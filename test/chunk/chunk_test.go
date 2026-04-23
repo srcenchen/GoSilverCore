@@ -2,6 +2,7 @@ package chunk
 
 import (
 	"fmt"
+	"go-silver-core/pkg/chunk"
 	"hash/crc32"
 	"os"
 	"testing"
@@ -13,7 +14,7 @@ func TestFileChunk(t *testing.T) {
 		t.Fatal("文件打开失败")
 	}
 	defer f.Close()
-	c := NewFileChunk(f)
+	c := chunk.NewFileChunk(f)
 	fileHash := map[int64]string{}
 	for i := int64(0); i < c.GetChunkNum(); i++ {
 		buf, _ := c.ReadChunk(i)
@@ -24,7 +25,7 @@ func TestFileChunk(t *testing.T) {
 	fs, _ := f.Stat()
 	fNew, _ := os.Create("out.apk")
 	fNew.Truncate(fs.Size())
-	cNew := NewFileChunk(fNew)
+	cNew := chunk.NewFileChunk(fNew)
 	for i := int64(0); i < c.GetChunkNum(); i++ {
 		buf, _ := c.ReadChunk(i)
 		cNew.Save(i, buf)

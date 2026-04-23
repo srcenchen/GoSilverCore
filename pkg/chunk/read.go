@@ -9,8 +9,8 @@ func (f *FileChunk) ReadChunk(index int64) ([]byte, error) {
 	}
 	readSize := int64(chunkSize)
 	offset := int64(chunkSize * index)
-	if offset+readSize > f.fileStat.Size() {
-		readSize = f.fileStat.Size() - offset
+	if offset+readSize > f.FileStat.Size() {
+		readSize = f.FileStat.Size() - offset
 	}
 	buf := make([]byte, readSize)
 	_, err := f.file.ReadAt(buf, offset)

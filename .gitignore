@@ -1,2 +1,3 @@
-/pkg/chunk/test.apk
-/pkg/chunk/out.apk
+.DS_Store
+/test/gsp/out.apk
+/test/gsp/test.apk
