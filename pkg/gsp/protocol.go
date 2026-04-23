@@ -13,3 +13,15 @@ type Packet struct {
 	Length  uint32
 	Payload []byte
 }
+
+// Peer 对端，也可以认为是连接状态
+// 包含连接ip、端口信息。正在连接的设备数
+type Peer struct {
+	Addr    string
+	ConnNum int
+}
+
+// TransferSession GSP 协议的连接会话
+type TransferSession struct {
+	BlockOwners map[int64][]*Peer // BlockOwners[1] 就可以获取到拥有第一块的设备列表
+}
