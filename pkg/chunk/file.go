@@ -4,7 +4,7 @@ import (
 	"os"
 )
 
-const chunkSize = 16 * (1 << 20)
+const chunkSize = 8 * (1 << 20)
 
 // FileChunk 文件逻辑分块
 type FileChunk struct {
