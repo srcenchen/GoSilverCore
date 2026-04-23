@@ -8,10 +8,12 @@ import (
 // codec gsp 协议的编解码模块
 
 type Codec struct {
+	IReader io.Reader
 }
 
 // Decode GSP 数据解码
-func (c *Codec) Decode(r io.Reader) (*Packet, error) {
+func (c *Codec) Decode() (*Packet, error) {
+	r := c.IReader
 	// 获取帧头
 	header := make([]byte, 5)
 	_, err := io.ReadFull(r, header)

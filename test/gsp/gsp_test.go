@@ -1,8 +1,8 @@
 package gsp
 
 import (
+	gsp2 "go-silver-core/internal/gsp"
 	"go-silver-core/pkg/chunk"
-	"go-silver-core/pkg/gsp"
 	"io"
 	"log"
 	"net"
@@ -18,8 +18,8 @@ func TestDecode(t *testing.T) {
 		panic(err)
 	}
 	defer conn.Close()
-	codec := gsp.Codec{}
-	data, err := codec.Decode(conn)
+	codec := gsp2.Codec{IReader: conn}
+	data, err := codec.Decode()
 	log.Printf("chunkData: %s", string(data.Payload))
 	arr := strings.Split(string(data.Payload), ",")
 	if len(arr) == 2 {
@@ -29,9 +29,9 @@ func TestDecode(t *testing.T) {
 		f.Truncate(fileSize)
 		ck := chunk.NewFileChunk(f)
 		for i := int64(0); i < blockNum; i++ {
-			d := codec.Encode(gsp.TypeJSON, []byte(strconv.FormatInt(i, 10)))
+			d := codec.Encode(gsp2.TypeJSON, []byte(strconv.FormatInt(i, 10)))
 			_, _ = conn.Write(d)
-			data, err := codec.Decode(conn)
+			data, err := codec.Decode()
 			if err != nil {
 				if err == io.EOF {
 					log.Println("服务器断开连接")
@@ -40,7 +40,7 @@ func TestDecode(t *testing.T) {
 				}
 				break
 			}
-			if data.Type == gsp.TypeFileChunk {
+			if data.Type == gsp2.TypeFileChunk {
 				ck.Save(i, data.Payload)
 			}
 		}
@@ -69,15 +69,15 @@ func handleConn(conn net.Conn) {
 	f, _ := os.Open("test.apk")
 	ck := chunk.NewFileChunk(f)
 	chunkNum := ck.GetChunkNum()
-	codec := gsp.Codec{}
+	codec := gsp2.Codec{IReader: conn}
 
 	// 发送块大小
-	data := codec.Encode(gsp.TypeJSON, []byte(strconv.FormatInt(chunkNum, 10)+","+strconv.FormatInt(ck.FileStat.Size(), 10)))
+	data := codec.Encode(gsp2.TypeJSON, []byte(strconv.FormatInt(chunkNum, 10)+","+strconv.FormatInt(ck.FileStat.Size(), 10)))
 	_, _ = conn.Write(data)
 	// 进入等待块请求模式
 	go func() {
 		for {
-			data, err := codec.Decode(conn)
+			data, err := codec.Decode()
 			if err != nil {
 				if err == io.EOF {
 					log.Println("服务器断开连接")
@@ -86,14 +86,23 @@ func handleConn(conn net.Conn) {
 				}
 				break
 			}
-			if data.Type == gsp.TypeJSON {
+			if data.Type == gsp2.TypeJSON {
 				index, _ := strconv.ParseInt(string(data.Payload), 10, 64)
 				chunkData, _ := ck.ReadChunk(index)
-				d := codec.Encode(gsp.TypeFileChunk, chunkData)
+				d := codec.Encode(gsp2.TypeFileChunk, chunkData)
 				_, _ = conn.Write(d)
 			}
 		}
 	}()
 	select {}
 
+}
+
+func TestGspSession(t *testing.T) {
+	session := gsp2.NewGspSession(":58080")
+	err := session.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {}
 }
