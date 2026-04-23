@@ -3,7 +3,6 @@ package chunk
 import (
 	"fmt"
 	"hash/crc32"
-	"log"
 	"os"
 	"testing"
 )
@@ -20,7 +19,7 @@ func TestFileChunk(t *testing.T) {
 		buf, _ := c.ReadChunk(i)
 		checksum := crc32.ChecksumIEEE(buf)
 		fileHash[i] = fmt.Sprintf("%x", checksum)
-		log.Printf("第 %d / %d 块的 crc32 值为 %x", i+1, c.GetChunkNum(), checksum)
+		t.Logf("第 %d / %d 块的 crc32 值为 %x", i+1, c.GetChunkNum(), checksum)
 	}
 	fs, _ := f.Stat()
 	fNew, _ := os.Create("out.apk")
@@ -30,5 +29,16 @@ func TestFileChunk(t *testing.T) {
 		buf, _ := c.ReadChunk(i)
 		cNew.Save(i, buf)
 	}
+	// 判断哈希值是否相同
+	t.Logf("准备校验Hash")
+	for i := int64(0); i < cNew.GetChunkNum(); i++ {
+		buf, _ := cNew.ReadChunk(i)
+		checksum := crc32.ChecksumIEEE(buf)
+		t.Logf("第 %d / %d 块的 crc32 值为 %x", i+1, cNew.GetChunkNum(), checksum)
+		if fmt.Sprintf("%x", checksum) != fileHash[i] {
+			t.Fatal("哈希值不同！")
+		}
+	}
 	fNew.Close()
+
 }
