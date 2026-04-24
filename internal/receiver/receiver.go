@@ -19,7 +19,7 @@ func Start(senderAddr string) {
 		return
 	}
 	// 创建 文件
-	f, err := os.Create(status.FileName)
+	f, err := os.Create("gs-" + status.FileName)
 	if err != nil {
 		panic("文件创建失败")
 	}
@@ -27,11 +27,8 @@ func Start(senderAddr string) {
 	ck := chunk.NewFileChunk(f)
 	for i := int64(0); i < status.ChunkNum; i++ {
 		fmt.Printf("下载 %d / %d 块中...\n", i+1, status.ChunkNum)
-		data, err := gspC.GetChunk(senderAddr, i)
+		_, err = gspC.GetChunk(senderAddr, i, ck)
 		if err != nil {
-			panic(err)
-		}
-		if err := ck.Save(i, data); err != nil {
 			panic(err)
 		}
 	}
