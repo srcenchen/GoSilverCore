@@ -1,7 +1,7 @@
 package queue
 
 import (
-	"go-silver-core/internal/gsp"
+	"go-silver-core/internal/gsp_sdk"
 	"net"
 )
 
@@ -12,10 +12,10 @@ type DownloadQueue interface {
 }
 
 type downloadQueue struct {
-	session gsp.Session // 这里我提供了Session，可以在这里根据块的index去获取相关的peer,有此块的设备信息
+	session gsp_sdk.Session // 这里我提供了Session，可以在这里根据块的index去获取相关的peer,有此块的设备信息
 }
 
-func NewDownloadQueue(session gsp.Session) DownloadQueue {
+func NewDownloadQueue(session gsp_sdk.Session) DownloadQueue {
 	return downloadQueue{session: session}
 }
 
