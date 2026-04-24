@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go-silver-core/internal/chunk"
+	"go-silver-core/internal/conn_pool"
 	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk/model"
 	"hash/crc32"
@@ -12,12 +14,14 @@ import (
 
 // GspSdk 大多数的功能是给 receiver 端调用的
 type GspSdk struct {
-	conn  net.Conn // 与发送端的连接
-	codec gsp.Codec
+	conn     net.Conn // 与发送端的连接
+	codec    gsp.Codec
+	connPool *conn_pool.ConnPool
 }
 
 func NewGspSdk(conn net.Conn) GspSdk {
-	return GspSdk{conn: conn}
+	connPool := conn_pool.NewConnPool(3)
+	return GspSdk{conn: conn, connPool: connPool}
 }
 
 // GetFileStatus 获取文件状态请求
@@ -38,8 +42,8 @@ func (g *GspSdk) GetFileStatus() (r model.GetFileStatusResp, err error) {
 }
 
 // GetChunk 获取文件块
-func (g *GspSdk) GetChunk(addr string, i int64) (r []byte, err error) {
-	conn, err := net.Dial("tcp", addr)
+func (g *GspSdk) GetChunk(addr string, i int64, ck *chunk.FileChunk) (r []byte, err error) {
+	conn, err := g.connPool.GetConn(addr)
 	if err != nil {
 		return r, err
 	}
@@ -53,10 +57,13 @@ func (g *GspSdk) GetChunk(addr string, i int64) (r []byte, err error) {
 	var chunkInfo model.GetChunkResp
 	_ = json.Unmarshal(resp.Payload, &chunkInfo)
 	resp, _ = g.codec.Decode(conn)
-	curChecksum := crc32.ChecksumIEEE(resp.Payload)
 	r = resp.Payload
+	curChecksum := crc32.ChecksumIEEE(resp.Payload)
 	if curChecksum != chunkInfo.CheckSum {
 		return r, errors.New("接收块失败，Checksum校验失败")
 	}
+	ck.Save(i, resp.Payload)
+	// 归还conn
+	g.connPool.PutConn(addr, conn)
 	return
 }

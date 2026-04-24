@@ -8,6 +8,7 @@ import (
 	"go-silver-core/pkg/mempool"
 	"net"
 	"os"
+	"sync"
 )
 
 func Start(senderAddr string) {
@@ -21,23 +22,29 @@ func Start(senderAddr string) {
 		return
 	}
 	// 创建 文件
-	f, err := os.Create(status.FileName)
+	f, err := os.Create("gs-" + status.FileName)
 	if err != nil {
 		panic("文件创建失败")
 	}
 	f.Truncate(status.FileSize)
+	var wg sync.WaitGroup
+	limit := make(chan struct{}, 5)
 	mp := mempool.NewMemPool(_const.ChunkSize)
 	ck := chunk.NewFileChunk(f, &mp)
 	for i := int64(0); i < status.ChunkNum; i++ {
-		fmt.Printf("下载 %d / %d 块中...\n", i+1, status.ChunkNum)
-		data, err := gspC.GetChunk(senderAddr, i)
-		if err != nil {
-			panic(err)
-		}
-		if err := ck.Save(i, data); err != nil {
-			panic(err)
-		}
+		wg.Add(1)
+		limit <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-limit }()
+			fmt.Printf("下载 %d / %d 块中...\n", i+1, status.ChunkNum)
+			_, err = gspC.GetChunk(senderAddr, i, ck)
+			if err != nil {
+				panic(err)
+			}
+		}()
 	}
+	wg.Wait()
 	fmt.Println("下载完毕！")
 	os.Exit(0)
 }

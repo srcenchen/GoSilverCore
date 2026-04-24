@@ -4,11 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"go-silver-core/internal/chunk"
+	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/gsp"
 	"go-silver-core/pkg/mempool"
+	"hash/crc32"
 	"log/slog"
 	"net"
 	"os"
+	"sync"
 )
 
 type Peer struct {
@@ -19,11 +22,12 @@ type Peer struct {
 // Session 这里是发送端的Session
 // 但每个节点都算一个发送端的，所以都会配备一个Session
 type Session struct {
+	mu              sync.Mutex
 	lis             net.Listener
 	addr            string
 	conn            map[string]net.Conn
 	ChunkBlockOwner map[int64][]*Peer
-	chunkHas        map[int64]uint32 // 用于判断是否拥有这个块，value是他的哈希值
+	chunkHash       map[int64]uint32 // 块哈希值
 	chunkProvider   chunk.FileChunk  // chunk块
 	memPool         *mempool.MemPool
 }
@@ -45,7 +49,7 @@ func (s *Session) ReadChunk(i int64, buf []byte) (int, error) {
 func NewGspSession(addr string, mempool *mempool.MemPool) *Session {
 	return &Session{
 		addr:            addr,
-		chunkHas:        map[int64]uint32{},
+		chunkHash:       map[int64]uint32{},
 		ChunkBlockOwner: make(map[int64][]*Peer),
 		conn:            make(map[string]net.Conn),
 		memPool:         mempool,
@@ -76,12 +80,6 @@ func (s *Session) BeSendMain(f *os.File) error {
 	n := ck.GetChunkNum()
 	s.chunkProvider = *ck
 	for i := int64(0); i < n; i++ {
-		cs, err := ck.CheckSum(i)
-		if err != nil {
-			return err
-		}
-		fmt.Println(cs)
-		s.chunkHas[i] = cs
 		peer := &Peer{connAddr: "", connNum: 0}
 		s.ChunkBlockOwner[i] = append(s.ChunkBlockOwner[i], peer)
 	}
@@ -124,14 +122,20 @@ func (s *Session) parsePacket(conn net.Conn, packet *gsp.Packet) error {
 // IndexValid 校验 index 下标这个块是合法的，当前拥有这个块
 // 返回 存在与否、哈希校验值
 func (s *Session) IndexValid(i int64) (bool, uint32) {
-	if v, ok := s.chunkHas[i]; ok {
-		return true, v
+	if i < 0 || i >= int64(len(s.ChunkBlockOwner)) {
+		return false, 0
 	}
-	return false, 0
+	buf := s.memPool.Get(_const.ChunkSize)
+	c, _ := s.chunkProvider.ReadChunk(i, *buf)
+	return true, crc32.ChecksumIEEE((*buf)[:c])
 }
 
 // CloseConn 关闭连接
 func (s *Session) CloseConn(conn net.Conn) {
 	_ = conn.Close()
-	delete(s.conn, conn.RemoteAddr().String())
+	s.mu.Lock()
+	if _, ok := s.conn[conn.RemoteAddr().String()]; ok {
+		delete(s.conn, conn.RemoteAddr().String())
+	}
+	s.mu.Unlock()
 }
