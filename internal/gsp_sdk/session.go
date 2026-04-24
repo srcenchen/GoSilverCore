@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"sync"
 )
 
 type Peer struct {
@@ -19,6 +20,7 @@ type Peer struct {
 // Session 这里是发送端的Session
 // 但每个节点都算一个发送端的，所以都会配备一个Session
 type Session struct {
+	mu              sync.Mutex
 	lis             net.Listener
 	addr            string
 	conn            map[string]net.Conn
@@ -122,7 +124,9 @@ func (s *Session) IndexValid(i int64) (bool, uint32) {
 // CloseConn 关闭连接
 func (s *Session) CloseConn(conn net.Conn) {
 	_ = conn.Close()
+	s.mu.Lock()
 	if _, ok := s.conn[conn.RemoteAddr().String()]; ok {
 		delete(s.conn, conn.RemoteAddr().String())
 	}
+	s.mu.Unlock()
 }

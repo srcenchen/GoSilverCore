@@ -6,6 +6,7 @@ import (
 	"go-silver-core/pkg/chunk"
 	"net"
 	"os"
+	"sync"
 )
 
 func Start(senderAddr string) {
@@ -25,13 +26,22 @@ func Start(senderAddr string) {
 	}
 	f.Truncate(status.FileSize)
 	ck := chunk.NewFileChunk(f)
+	var wg sync.WaitGroup
+	limit := make(chan struct{}, 5)
 	for i := int64(0); i < status.ChunkNum; i++ {
-		fmt.Printf("下载 %d / %d 块中...\n", i+1, status.ChunkNum)
-		_, err = gspC.GetChunk(senderAddr, i, ck)
-		if err != nil {
-			panic(err)
-		}
+		wg.Add(1)
+		limit <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-limit }()
+			fmt.Printf("下载 %d / %d 块中...\n", i+1, status.ChunkNum)
+			_, err = gspC.GetChunk(senderAddr, i, ck)
+			if err != nil {
+				panic(err)
+			}
+		}()
 	}
+	wg.Wait()
 	fmt.Println("下载完毕！")
 	os.Exit(0)
 }
