@@ -26,13 +26,23 @@ type Session struct {
 	chunkProvider   chunk.FileChunk  // chunk块
 }
 
+// GetChunk 获取块实体
+func (s *Session) GetChunk() chunk.FileChunk {
+	return s.chunkProvider
+}
+
 // ReadChunk 获取Chunk块
 func (s *Session) ReadChunk(i int64) ([]byte, error) {
 	return s.chunkProvider.ReadChunk(i)
 }
 
 func NewGspSession(addr string) *Session {
-	return &Session{addr: addr}
+	return &Session{
+		addr:            addr,
+		chunkHas:        map[int64]uint32{},
+		ChunkBlockOwner: make(map[int64][]*Peer),
+		conn:            make(map[string]net.Conn),
+	}
 }
 
 func (s *Session) Start() error {
@@ -57,11 +67,13 @@ func (s *Session) Start() error {
 func (s *Session) BeSendMain(f *os.File) error {
 	ck := chunk.NewFileChunk(f)
 	n := ck.GetChunkNum()
+	s.chunkProvider = *ck
 	for i := int64(0); i < n; i++ {
 		cs, err := ck.CheckSum(i)
 		if err != nil {
 			return err
 		}
+		fmt.Println(cs)
 		s.chunkHas[i] = cs
 		peer := &Peer{connAddr: "", connNum: 0}
 		s.ChunkBlockOwner[i] = append(s.ChunkBlockOwner[i], peer)
@@ -73,17 +85,20 @@ func (s *Session) BeSendMain(f *os.File) error {
 func (s *Session) handle(conn net.Conn) {
 	addr := conn.RemoteAddr()
 	s.conn[addr.String()] = conn
+	slog.Info("与接收端的连接已经建立 " + addr.String())
 	defer s.CloseConn(conn)
 	for {
 		codec := gsp.Codec{}
 		packet, err := codec.Decode(conn)
 		if err != nil {
-			slog.Error(fmt.Sprintf("接收端 %s 发生错误，即将断开连接 %s. "))
+			slog.Error(fmt.Sprintf("接收端 %s 即将断开连接 %s. ", addr, err))
 			s.CloseConn(conn)
+			return
 		}
 		if err := s.parsePacket(conn, packet); err != nil {
-			slog.Error(fmt.Sprintf("接收端 %s 发生错误，即将断开连接 %s. "))
+			slog.Error(fmt.Sprintf("接收端 %s 即将断开连接 %s. ", addr, err))
 			s.CloseConn(conn)
+			return
 		}
 	}
 }
