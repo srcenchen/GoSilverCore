@@ -2,9 +2,10 @@ package handle
 
 import (
 	"encoding/json"
+	"go-silver-core/internal/chunk"
 	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk/model"
-	"go-silver-core/pkg/chunk"
+	"go-silver-core/pkg/mempool"
 	"net"
 )
 
@@ -12,9 +13,10 @@ import (
 
 type ToolSession interface {
 	IndexValid(int64) (bool, uint32)
-	ReadChunk(int64) ([]byte, error)
+	ReadChunk(i int64, buf []byte) (int, error)
 	CloseConn(conn net.Conn)
 	GetChunk() chunk.FileChunk
+	GetMemPool() *mempool.MemPool
 }
 
 // GetFileStatus 获取文件信息
@@ -44,6 +46,7 @@ func ReportChunkStatus(conn net.Conn, data []byte, tool ToolSession) {
 // GetChunk 处理获取指定片的请求处理
 // 当接收端发起这个请求，我们就需要开始发送这一个块
 func GetChunk(conn net.Conn, data []byte, tool ToolSession) {
+	ck := tool.GetChunk()
 	var gc model.GetChunkReq
 	err := json.Unmarshal(data, &gc)
 	if err != nil {
@@ -60,12 +63,15 @@ func GetChunk(conn net.Conn, data []byte, tool ToolSession) {
 		return
 	}
 	// 发送回应结束，开始发送数据块
-	fileChunk, err := tool.ReadChunk(gc.Index)
+	// 借用
+	mp := tool.GetMemPool()
+	fileChunk := mp.Get(ck.GetChunkSize())
+	n, err := tool.ReadChunk(gc.Index, *fileChunk)
 	if err != nil {
 		tool.CloseConn(conn)
 		return
 	}
-	respData = codec.Encode(gsp.TypeFileChunk, fileChunk)
+	respData = codec.Encode(gsp.TypeFileChunk, (*fileChunk)[:n])
 	if _, err = conn.Write(respData); err != nil {
 		tool.CloseConn(conn)
 		return

@@ -2,8 +2,10 @@ package receiver
 
 import (
 	"fmt"
+	"go-silver-core/internal/chunk"
+	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/gsp_sdk"
-	"go-silver-core/pkg/chunk"
+	"go-silver-core/pkg/mempool"
 	"net"
 	"os"
 )
@@ -24,7 +26,8 @@ func Start(senderAddr string) {
 		panic("文件创建失败")
 	}
 	f.Truncate(status.FileSize)
-	ck := chunk.NewFileChunk(f)
+	mp := mempool.NewMemPool(_const.ChunkSize)
+	ck := chunk.NewFileChunk(f, &mp)
 	for i := int64(0); i < status.ChunkNum; i++ {
 		fmt.Printf("下载 %d / %d 块中...\n", i+1, status.ChunkNum)
 		data, err := gspC.GetChunk(senderAddr, i)

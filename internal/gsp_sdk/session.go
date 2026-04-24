@@ -3,8 +3,9 @@ package gsp_sdk
 import (
 	"errors"
 	"fmt"
+	"go-silver-core/internal/chunk"
 	"go-silver-core/internal/gsp"
-	"go-silver-core/pkg/chunk"
+	"go-silver-core/pkg/mempool"
 	"log/slog"
 	"net"
 	"os"
@@ -24,6 +25,11 @@ type Session struct {
 	ChunkBlockOwner map[int64][]*Peer
 	chunkHas        map[int64]uint32 // 用于判断是否拥有这个块，value是他的哈希值
 	chunkProvider   chunk.FileChunk  // chunk块
+	memPool         *mempool.MemPool
+}
+
+func (s *Session) GetMemPool() *mempool.MemPool {
+	return s.memPool
 }
 
 // GetChunk 获取块实体
@@ -32,16 +38,17 @@ func (s *Session) GetChunk() chunk.FileChunk {
 }
 
 // ReadChunk 获取Chunk块
-func (s *Session) ReadChunk(i int64) ([]byte, error) {
-	return s.chunkProvider.ReadChunk(i)
+func (s *Session) ReadChunk(i int64, buf []byte) (int, error) {
+	return s.chunkProvider.ReadChunk(i, buf)
 }
 
-func NewGspSession(addr string) *Session {
+func NewGspSession(addr string, mempool *mempool.MemPool) *Session {
 	return &Session{
 		addr:            addr,
 		chunkHas:        map[int64]uint32{},
 		ChunkBlockOwner: make(map[int64][]*Peer),
 		conn:            make(map[string]net.Conn),
+		memPool:         mempool,
 	}
 }
 
@@ -65,7 +72,7 @@ func (s *Session) Start() error {
 
 // BeSendMain 作为发送主机
 func (s *Session) BeSendMain(f *os.File) error {
-	ck := chunk.NewFileChunk(f)
+	ck := chunk.NewFileChunk(f, s.memPool)
 	n := ck.GetChunkNum()
 	s.chunkProvider = *ck
 	for i := int64(0); i < n; i++ {

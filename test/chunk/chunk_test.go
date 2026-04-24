@@ -2,7 +2,7 @@ package chunk
 
 import (
 	"fmt"
-	"go-silver-core/pkg/chunk"
+	"go-silver-core/internal/chunk"
 	"hash/crc32"
 	"os"
 	"testing"

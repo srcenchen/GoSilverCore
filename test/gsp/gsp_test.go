@@ -1,9 +1,9 @@
 package gsp
 
 import (
+	"go-silver-core/internal/chunk"
 	gsp2 "go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk"
-	"go-silver-core/pkg/chunk"
 	"io"
 	"log"
 	"net"
