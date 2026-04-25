@@ -122,12 +122,18 @@ func (s *Session) parsePacket(conn net.Conn, packet *gsp.Packet) error {
 // IndexValid 校验 index 下标这个块是合法的，当前拥有这个块
 // 返回 存在与否、哈希校验值
 func (s *Session) IndexValid(i int64) (bool, uint32) {
+	s.mu.Lock()
+	if v, ok := s.chunkHash[i]; ok {
+		return true, v
+	}
 	if i < 0 || i >= int64(len(s.ChunkBlockOwner)) {
 		return false, 0
 	}
 	buf := s.memPool.Get(_const.ChunkSize)
 	c, _ := s.chunkProvider.ReadChunk(i, *buf)
-	return true, crc32.ChecksumIEEE((*buf)[:c])
+	cm := crc32.ChecksumIEEE((*buf)[:c])
+	s.chunkHash[i] = cm
+	return true, cm
 }
 
 // CloseConn 关闭连接
