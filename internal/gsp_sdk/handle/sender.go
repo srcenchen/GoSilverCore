@@ -6,17 +6,22 @@ import (
 	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk/model"
 	"go-silver-core/pkg/mempool"
+	"go-silver-core/pkg/queue"
 	"net"
+	"strings"
 )
 
 // sender 发送方处理接收到的数据，进行对应的操作
 
+// ToolSession Session的一些工具链
 type ToolSession interface {
 	IndexValid(int64) (bool, uint32)
 	ReadChunk(i int64, buf []byte) (int, error)
 	CloseConn(conn net.Conn)
 	GetChunk() chunk.FileChunk
 	GetMemPool() *mempool.MemPool
+	GetQueue() queue.DownloadQueue
+	AddBlockOwner(i int64, addr string)
 }
 
 // GetFileStatus 获取文件信息
@@ -35,12 +40,26 @@ func GetFileStatus(conn net.Conn, data []byte, tool ToolSession) {
 
 // WantChunk 想要这个 chunk
 func WantChunk(conn net.Conn, data []byte, tool ToolSession) {
-
+	var wc model.WantChunkReq
+	err := json.Unmarshal(data, &wc)
+	if err != nil {
+		tool.CloseConn(conn)
+		return
+	}
+	q := tool.GetQueue()
+	q.Want(wc.Index, conn)
 }
 
-// ReportChunkStatus 上报自己拥有了这个块
-func ReportChunkStatus(conn net.Conn, data []byte, tool ToolSession) {
-
+// ReportChunk 接收端上报自己拥有了这个块
+func ReportChunk(conn net.Conn, data []byte, tool ToolSession) {
+	var wc model.ReportChunkReq
+	err := json.Unmarshal(data, &wc)
+	if err != nil {
+		tool.CloseConn(conn)
+		return
+	}
+	ip := strings.Split(conn.RemoteAddr().String(), ":")[0]
+	tool.AddBlockOwner(wc.Index, ip+":"+wc.Port)
 }
 
 // GetChunk 处理获取指定片的请求处理

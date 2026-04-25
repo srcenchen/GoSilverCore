@@ -10,10 +10,10 @@ import (
 type HandlerFunc func(conn net.Conn, data []byte, tool handle.ToolSession)
 
 var Mux = map[string]HandlerFunc{
-	"getChunk":          handle.GetChunk,
-	"getFileStatus":     handle.GetFileStatus,
-	"wantChunk":         handle.WantChunk,
-	"reportChunkStatus": handle.ReportChunkStatus,
+	"getChunk":      handle.GetChunk,
+	"getFileStatus": handle.GetFileStatus,
+	"wantChunk":     handle.WantChunk,
+	"reportChunk":   handle.ReportChunk,
 }
 
 func (s *Session) SenderOperation(conn net.Conn, payload []byte) error {

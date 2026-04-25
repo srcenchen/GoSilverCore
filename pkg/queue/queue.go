@@ -1,27 +1,38 @@
 package queue
 
 import (
-	"go-silver-core/internal/gsp_sdk"
+	"go-silver-core/internal/chunk"
+	"go-silver-core/pkg/mempool"
 	"net"
 )
 
 // DownloadQueue 下载队列
 
 type DownloadQueue interface {
-	want(i int64, conn net.Conn)
+	Want(i int64, conn net.Conn)
+}
+
+// ToolSession Session的一些工具链
+type ToolSession interface {
+	IndexValid(int64) (bool, uint32)
+	ReadChunk(i int64, buf []byte) (int, error)
+	CloseConn(conn net.Conn)
+	GetChunk() chunk.FileChunk
+	GetMemPool() *mempool.MemPool
+	AddBlockOwner(i int64, addr string)
 }
 
 type downloadQueue struct {
-	session gsp_sdk.Session // 这里我提供了Session，可以在这里根据块的index去获取相关的peer,有此块的设备信息
+	toolSession ToolSession // 这里我提供了Session，可以在这里根据块的index去获取相关的peer,有此块的设备信息
 }
 
-func NewDownloadQueue(session gsp_sdk.Session) DownloadQueue {
-	return downloadQueue{session: session}
+func NewDownloadQueue() DownloadQueue {
+	return &downloadQueue{}
 }
 
-// want 当有人要加入队列，此函数就会被调用
+// Want 当有人要加入队列，此函数就会被调用
 // 第一个参数是块的序号，从0开始。第二个是连接的实体。
-func (d downloadQueue) want(i int64, conn net.Conn) {
+func (d *downloadQueue) Want(i int64, conn net.Conn) {
 	//TODO implement me
 	panic("implement me")
 }
@@ -31,6 +42,6 @@ func (d downloadQueue) want(i int64, conn net.Conn) {
 // 第一个参数：文件块序号
 // 第二个参数：接收者的连接实体
 // 第三个参数：在 session.ChunkBlockOwner 中获取的address
-func (d downloadQueue) send(i int64, receiver net.Conn, address string) {
+func (d *downloadQueue) send(i int64, receiver net.Conn, address string) {
 
 }

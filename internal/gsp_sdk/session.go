@@ -1,14 +1,18 @@
 package gsp_sdk
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go-silver-core/internal/chunk"
 	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/gsp"
+	"go-silver-core/internal/gsp_sdk/model"
 	"go-silver-core/pkg/mempool"
+	"go-silver-core/pkg/queue"
 	"hash/crc32"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"os"
 	"sync"
@@ -30,6 +34,7 @@ type Session struct {
 	chunkHash       map[int64]uint32 // 块哈希值
 	chunkProvider   chunk.FileChunk  // chunk块
 	memPool         *mempool.MemPool
+	queue           *queue2
 }
 
 func (s *Session) GetMemPool() *mempool.MemPool {
@@ -47,6 +52,7 @@ func (s *Session) ReadChunk(i int64, buf []byte) (int, error) {
 }
 
 func NewGspSession(addr string, mempool *mempool.MemPool) *Session {
+
 	return &Session{
 		addr:            addr,
 		chunkHash:       map[int64]uint32{},
@@ -86,10 +92,61 @@ func (s *Session) BeSendMain(f *os.File) error {
 	return nil
 }
 
+// BeSendSub 作为发送从机
+func (s *Session) BeSendSub(f *os.File) {
+	ck := chunk.NewFileChunk(f, s.memPool)
+	s.chunkProvider = *ck
+	return
+}
+
+// AddChunk 添加文件块哈希
+func (s *Session) AddChunk(i int64, checksum uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.chunkHash[i]; !ok {
+		s.chunkHash[i] = checksum
+	}
+}
+
+// AddBlockOwner 添加文件拥有
+func (s *Session) AddBlockOwner(i int64, addr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ChunkBlockOwner[i] = append(s.ChunkBlockOwner[i], &Peer{connAddr: addr})
+}
+
+// TODO 测试用队列
+type queue2 struct {
+	s *Session
+}
+
+func (q *queue2) Want(i int64, conn net.Conn) {
+	// 直接把自己发出去
+	c := gsp.Codec{}
+	n := rand.IntN(len(q.s.ChunkBlockOwner[i]))
+	jc, _ := json.Marshal(model.WantChunkResp{
+		Index:    i,
+		Addr:     q.s.ChunkBlockOwner[i][n].connAddr,
+		CheckSum: 0,
+	})
+	resp := c.Encode(gsp.TypeJSON, jc)
+	conn.Write(resp)
+}
+
+// GetQueue 获取队列
+func (s *Session) GetQueue() queue.DownloadQueue {
+	if s.queue == nil {
+		s.queue = &queue2{s: s}
+	}
+	return s.queue
+}
+
 // handle 处理接收端的连接
 func (s *Session) handle(conn net.Conn) {
 	addr := conn.RemoteAddr()
+	s.mu.Lock()
 	s.conn[addr.String()] = conn
+	s.mu.Unlock()
 	slog.Info("与接收端的连接已经建立 " + addr.String())
 	defer s.CloseConn(conn)
 	for {
@@ -123,6 +180,7 @@ func (s *Session) parsePacket(conn net.Conn, packet *gsp.Packet) error {
 // 返回 存在与否、哈希校验值
 func (s *Session) IndexValid(i int64) (bool, uint32) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if v, ok := s.chunkHash[i]; ok {
 		return true, v
 	}

@@ -11,7 +11,7 @@ import (
 func Start(filePath string) {
 	// 启动sender服务端（主节点）
 	mp := mempool.NewMemPool(_const.ChunkSize)
-	s := gsp_sdk.NewGspSession(":18080", &mp)
+	s := gsp_sdk.NewGspSession(":48080", &mp)
 	s.Start()
 	f, err := os.Open(filePath)
 	if err != nil {
