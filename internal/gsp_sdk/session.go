@@ -188,6 +188,7 @@ func (s *Session) IndexValid(i int64) (bool, uint32) {
 		return false, 0
 	}
 	buf := s.memPool.Get(_const.ChunkSize)
+	defer s.memPool.Put(buf)
 	c, _ := s.chunkProvider.ReadChunk(i, *buf)
 	cm := crc32.ChecksumIEEE((*buf)[:c])
 	s.chunkHash[i] = cm
