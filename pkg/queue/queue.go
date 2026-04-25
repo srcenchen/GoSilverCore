@@ -41,7 +41,7 @@ func (d *downloadQueue) Want(i int64, conn net.Conn) {
 // @yyy 这个地方我来写
 // 第一个参数：文件块序号
 // 第二个参数：接收者的连接实体
-// 第三个参数：在 session.ChunkBlockOwner 中获取的address
+// 第三个参数：在 session.ChunkOwners 中获取的address
 func (d *downloadQueue) send(i int64, receiver net.Conn, address string) {
 
 }

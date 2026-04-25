@@ -2,6 +2,7 @@ package handle
 
 import (
 	"encoding/json"
+	"fmt"
 	"go-silver-core/internal/chunk"
 	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk/model"
@@ -22,6 +23,7 @@ type ToolSession interface {
 	GetMemPool() *mempool.MemPool
 	GetQueue() queue.DownloadQueue
 	AddBlockOwner(i int64, addr string)
+	RemovePeer(addr string)
 }
 
 // GetFileStatus 获取文件信息
@@ -78,6 +80,7 @@ func GetChunk(conn net.Conn, data []byte, tool ToolSession) {
 	codec := gsp.Codec{}
 	respData := codec.Encode(gsp.TypeJSON, resp)
 	if _, err := conn.Write(respData); err != nil || !has {
+		fmt.Println(err)
 		tool.CloseConn(conn)
 		return
 	}
@@ -95,4 +98,20 @@ func GetChunk(conn net.Conn, data []byte, tool ToolSession) {
 		tool.CloseConn(conn)
 		return
 	}
+}
+
+// PeerReg 想要这个 chunk
+func PeerReg(conn net.Conn, data []byte, tool ToolSession) {
+	var wc model.PeerRegReq
+	err := json.Unmarshal(data, &wc)
+	if err != nil {
+		tool.CloseConn(conn)
+		return
+	}
+	codec := gsp.Codec{}
+	_, err = codec.Decode(conn)
+	if err != nil {
+		tool.RemovePeer(strings.Split(conn.RemoteAddr().String(), ":")[0] + ":" + wc.Port)
+	}
+
 }

@@ -14,6 +14,7 @@ var Mux = map[string]HandlerFunc{
 	"getFileStatus": handle.GetFileStatus,
 	"wantChunk":     handle.WantChunk,
 	"reportChunk":   handle.ReportChunk,
+	"peerReg":       handle.PeerReg,
 }
 
 func (s *Session) SenderOperation(conn net.Conn, payload []byte) error {

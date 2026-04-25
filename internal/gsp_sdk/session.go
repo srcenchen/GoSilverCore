@@ -26,15 +26,31 @@ type Peer struct {
 // Session 这里是发送端的Session
 // 但每个节点都算一个发送端的，所以都会配备一个Session
 type Session struct {
-	mu              sync.Mutex
-	lis             net.Listener
-	addr            string
-	conn            map[string]net.Conn
-	ChunkBlockOwner map[int64][]*Peer
-	chunkHash       map[int64]uint32 // 块哈希值
-	chunkProvider   chunk.FileChunk  // chunk块
-	memPool         *mempool.MemPool
-	queue           *queue2
+	mu            sync.RWMutex
+	lis           net.Listener
+	addr          string
+	Peers         map[string]*Peer
+	ChunkOwners   map[int64]map[string]struct{} // 这个块拥有的Peer
+	PeerOwners    map[string]map[int64]struct{} // 这个Peer拥有的块
+	chunkHash     map[int64]uint32              // 块哈希值
+	chunkProvider chunk.FileChunk               // chunk块
+	memPool       *mempool.MemPool
+	queue         *queue2
+}
+
+// RemovePeer 移除 对端
+func (s *Session) RemovePeer(addr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cks, ok := s.PeerOwners[addr]; ok {
+		for ckIndex := range cks {
+			if _, ex := s.ChunkOwners[ckIndex][addr]; ex {
+				delete(s.ChunkOwners[ckIndex], addr)
+			}
+		}
+	}
+	delete(s.PeerOwners, addr)
+	delete(s.Peers, addr)
 }
 
 func (s *Session) GetMemPool() *mempool.MemPool {
@@ -54,11 +70,12 @@ func (s *Session) ReadChunk(i int64, buf []byte) (int, error) {
 func NewGspSession(addr string, mempool *mempool.MemPool) *Session {
 
 	return &Session{
-		addr:            addr,
-		chunkHash:       map[int64]uint32{},
-		ChunkBlockOwner: make(map[int64][]*Peer),
-		conn:            make(map[string]net.Conn),
-		memPool:         mempool,
+		addr:        addr,
+		chunkHash:   map[int64]uint32{},
+		ChunkOwners: make(map[int64]map[string]struct{}),
+		Peers:       map[string]*Peer{},
+		PeerOwners:  make(map[string]map[int64]struct{}),
+		memPool:     mempool,
 	}
 }
 
@@ -83,11 +100,13 @@ func (s *Session) Start() error {
 // BeSendMain 作为发送主机
 func (s *Session) BeSendMain(f *os.File) error {
 	ck := chunk.NewFileChunk(f, s.memPool)
-	n := ck.GetChunkNum()
+	nums := ck.GetChunkNum()
 	s.chunkProvider = *ck
-	for i := int64(0); i < n; i++ {
-		peer := &Peer{connAddr: "", connNum: 0}
-		s.ChunkBlockOwner[i] = append(s.ChunkBlockOwner[i], peer)
+	for i := int64(0); i < nums; i++ {
+		if s.ChunkOwners[i] == nil {
+			s.ChunkOwners[i] = make(map[string]struct{})
+		}
+		s.ChunkOwners[i][""] = struct{}{}
 	}
 	return nil
 }
@@ -112,7 +131,20 @@ func (s *Session) AddChunk(i int64, checksum uint32) {
 func (s *Session) AddBlockOwner(i int64, addr string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.ChunkBlockOwner[i] = append(s.ChunkBlockOwner[i], &Peer{connAddr: addr})
+	if _, ok := s.Peers[addr]; !ok {
+		s.Peers[addr] = &Peer{
+			connAddr: addr,
+			connNum:  0,
+		}
+	}
+	if s.ChunkOwners[i] == nil {
+		s.ChunkOwners[i] = make(map[string]struct{})
+	}
+	if s.PeerOwners[addr] == nil {
+		s.PeerOwners[addr] = make(map[int64]struct{})
+	}
+	s.PeerOwners[addr][i] = struct{}{}
+	s.ChunkOwners[i][addr] = struct{}{}
 }
 
 // TODO 测试用队列
@@ -123,14 +155,26 @@ type queue2 struct {
 func (q *queue2) Want(i int64, conn net.Conn) {
 	// 直接把自己发出去
 	c := gsp.Codec{}
-	n := rand.IntN(len(q.s.ChunkBlockOwner[i]))
+	targetAddr := ""
+	n := rand.IntN(len(q.s.ChunkOwners[i]))
+	index := 0
+	for addr, _ := range q.s.ChunkOwners[i] {
+		if index == n {
+			targetAddr = addr
+			break
+		}
+		index++
+	}
 	jc, _ := json.Marshal(model.WantChunkResp{
 		Index:    i,
-		Addr:     q.s.ChunkBlockOwner[i][n].connAddr,
+		Addr:     targetAddr,
 		CheckSum: 0,
 	})
 	resp := c.Encode(gsp.TypeJSON, jc)
-	conn.Write(resp)
+	_, err := conn.Write(resp)
+	if err != nil {
+		panic(err)
+	}
 }
 
 // GetQueue 获取队列
@@ -145,7 +189,6 @@ func (s *Session) GetQueue() queue.DownloadQueue {
 func (s *Session) handle(conn net.Conn) {
 	addr := conn.RemoteAddr()
 	s.mu.Lock()
-	s.conn[addr.String()] = conn
 	s.mu.Unlock()
 	slog.Info("与接收端的连接已经建立 " + addr.String())
 	defer s.CloseConn(conn)
@@ -184,7 +227,7 @@ func (s *Session) IndexValid(i int64) (bool, uint32) {
 	if v, ok := s.chunkHash[i]; ok {
 		return true, v
 	}
-	if i < 0 || i >= int64(len(s.ChunkBlockOwner)) {
+	if i < 0 || i >= int64(len(s.ChunkOwners)) {
 		return false, 0
 	}
 	buf := s.memPool.Get(_const.ChunkSize)
@@ -198,9 +241,4 @@ func (s *Session) IndexValid(i int64) (bool, uint32) {
 // CloseConn 关闭连接
 func (s *Session) CloseConn(conn net.Conn) {
 	_ = conn.Close()
-	s.mu.Lock()
-	if _, ok := s.conn[conn.RemoteAddr().String()]; ok {
-		delete(s.conn, conn.RemoteAddr().String())
-	}
-	s.mu.Unlock()
 }

@@ -20,7 +20,7 @@ type GspSdk struct {
 
 func NewGspSdk(srvAddr string) GspSdk {
 	connPool := conn_pool.NewConnPool(3)
-	return GspSdk{connPool: connPool, srvAddr: srvAddr}
+	return GspSdk{connPool: connPool, srvAddr: srvAddr, codec: gsp.Codec{}}
 }
 
 // GetFileStatus 获取文件状态请求
@@ -65,7 +65,10 @@ func (g *GspSdk) GetChunk(addr string, i int64, ck *chunk.FileChunk) (r []byte, 
 	if err := json.Unmarshal(resp.Payload, &chunkInfo); err != nil {
 		return nil, 0, fmt.Errorf("解析块信息失败: %v", err)
 	}
-	resp, _ = g.codec.Decode(conn)
+	resp, err = g.codec.Decode(conn)
+	if err != nil {
+		return nil, 0, err
+	}
 	r = resp.Payload
 	curChecksum := crc32.ChecksumIEEE(resp.Payload)
 	if curChecksum != chunkInfo.CheckSum {

@@ -40,3 +40,8 @@ type ReportChunkReq struct {
 	Index   int64  `json:"index"` // 告知指定的片
 	Port    string `json:"port"`
 }
+
+type PeerRegReq struct {
+	Operate string `json:"operate"`
+	Port    string `json:"port"`
+}

@@ -15,7 +15,7 @@ var (
 
 func init() {
 	flag.StringVar(&mode, "mode", "sender", "模式选择，receiver/sender")
-	flag.StringVar(&filePath, "file", "test.file", "文件路径")
+	flag.StringVar(&filePath, "file", "/Users/sanenchen/GoSilver/10g.file", "文件路径")
 	flag.StringVar(&senderAddr, "senderAddr", "127.0.0.1:18080", "发送端地址，类似 192.168.1.10:18080")
 }
 func main() {

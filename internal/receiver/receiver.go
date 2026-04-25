@@ -1,11 +1,15 @@
 package receiver
 
 import (
+	"encoding/json"
 	"fmt"
 	_const "go-silver-core/internal/const"
+	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk"
+	"go-silver-core/internal/gsp_sdk/model"
 	"go-silver-core/pkg/mempool"
 	"math/rand/v2" // 使用 v2 更快更现代
+	"net"
 	"os"
 	"sync"
 )
@@ -15,22 +19,31 @@ func Start(senderAddr string) {
 	mp := mempool.NewMemPool(_const.ChunkSize)
 	s := gsp_sdk.NewGspSession(":48081", &mp)
 	s.Start()
-
 	gspC := gsp_sdk.NewGspSdk(senderAddr)
 	status, err := gspC.GetFileStatus()
 	if err != nil {
 		return
 	}
-
 	f, err := os.Create("gs-" + status.FileName)
 	if err != nil {
 		panic("文件创建失败")
 	}
 	f.Truncate(status.FileSize)
-
 	s.BeSendSub(f)
 	ck := s.GetChunk()
 
+	// 开一条Peer控制流
+	controlConn, err := net.Dial("tcp", senderAddr)
+	if err != nil {
+		panic("连接服务端失败")
+	}
+	codec := gsp.Codec{}
+	jsonReq, _ := json.Marshal(model.PeerRegReq{
+		Operate: "peerReg",
+		Port:    "48081",
+	})
+	reqReg := codec.Encode(gsp.TypeJSON, jsonReq)
+	controlConn.Write(reqReg)
 	// --- 核心优化：生成并打乱索引序列 ---
 	indices := make([]int64, status.ChunkNum)
 	for i := range indices {
@@ -47,6 +60,7 @@ func Start(senderAddr string) {
 	limit := make(chan struct{}, 5)
 
 	for _, idx := range indices {
+		//idx := 1
 		wg.Add(1)
 		limit <- struct{}{}
 
@@ -82,9 +96,8 @@ func Start(senderAddr string) {
 			// 更新本地状态并上报，让别人能发现我有这个块
 			s.AddChunk(i, cm)
 			gspC.ReportChunk("48081", i)
-		}(idx)
+		}(int64(idx))
 	}
-
 	wg.Wait()
 	fmt.Println("下载完毕！")
 }
