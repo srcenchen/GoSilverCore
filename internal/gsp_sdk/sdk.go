@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"go-silver-core/internal/chunk"
-	"go-silver-core/internal/conn_pool"
 	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk/model"
+	"go-silver-core/pkg/conn_pool"
 	"hash/crc32"
 )
 
