@@ -12,7 +12,6 @@ import (
 	"go-silver-core/pkg/mempool"
 	"hash/crc32"
 	"log/slog"
-	"math/rand/v2"
 	"net"
 	"os"
 	"sync"
@@ -153,17 +152,15 @@ type queue2 struct {
 }
 
 func (q *queue2) Want(i int64, conn net.Conn) {
-	// 直接把自己发出去
+	// 如果只有自己直接把自己发出去
 	c := gsp.Codec{}
 	targetAddr := ""
-	n := rand.IntN(len(q.s.ChunkOwners[i]))
-	index := 0
-	for addr, _ := range q.s.ChunkOwners[i] {
-		if index == n {
-			targetAddr = addr
-			break
+	for addr := range q.s.ChunkOwners[i] {
+		if addr == "" {
+			continue
 		}
-		index++
+		targetAddr = addr
+		break
 	}
 	jc, _ := json.Marshal(model.WantChunkResp{
 		Index:    i,
