@@ -55,49 +55,60 @@ func Start(senderAddr string) {
 		indices[i], indices[j] = indices[j], indices[i]
 	})
 	// ---------------------------------
+	for len(indices) > 0 {
+		mu := sync.Mutex{}
+		var failedList []int64
+		var wg sync.WaitGroup
+		limit := make(chan struct{}, 5)
 
-	var wg sync.WaitGroup
-	limit := make(chan struct{}, 5)
+		for _, idx := range indices {
+			//idx := 1
+			wg.Add(1)
+			limit <- struct{}{}
 
-	for _, idx := range indices {
-		//idx := 1
-		wg.Add(1)
-		limit <- struct{}{}
+			// 这里的 idx 是作为参数传入，避免闭包捕获变量的坑（虽然 Go 1.22 已修复，但习惯要好）
+			go func(i int64) {
+				defer wg.Done()
+				defer func() { <-limit }()
 
-		// 这里的 idx 是作为参数传入，避免闭包捕获变量的坑（虽然 Go 1.22 已修复，但习惯要好）
-		go func(i int64) {
-			defer wg.Done()
-			defer func() { <-limit }()
+				fmt.Printf("申请 %d / %d 块中...\n", i+1, status.ChunkNum)
 
-			fmt.Printf("申请 %d / %d 块中...\n", i+1, status.ChunkNum)
+				// 向 Tracker/主服务器询问谁有这个块
+				reChunk, err := gspC.WantChunk(i)
+				if err != nil {
+					// 实际项目中这里建议增加重试，而不是直接 panic
+					fmt.Printf("警告：请求块 %d 失败: %v\n", i, err)
+					mu.Lock()
+					failedList = append(failedList, idx)
+					mu.Unlock()
+					return
+				}
 
-			// 向 Tracker/主服务器询问谁有这个块
-			reChunk, err := gspC.WantChunk(i)
-			if err != nil {
-				// 实际项目中这里建议增加重试，而不是直接 panic
-				fmt.Printf("警告：请求块 %d 失败: %v\n", i, err)
-				return
-			}
+				// 如果没人有，则回退到主服务器
+				targetAddr := reChunk.Addr
+				if targetAddr == "" {
+					targetAddr = senderAddr
+				}
 
-			// 如果没人有，则回退到主服务器
-			targetAddr := reChunk.Addr
-			if targetAddr == "" {
-				targetAddr = senderAddr
-			}
+				fmt.Printf("申请 %d / %d 块成功，对端地址 %s 下载中...\n", i+1, status.ChunkNum, targetAddr)
 
-			fmt.Printf("申请 %d / %d 块成功，对端地址 %s 下载中...\n", i+1, status.ChunkNum, targetAddr)
+				_, cm, err := gspC.GetChunk(targetAddr, i, &ck)
+				if err != nil {
+					fmt.Printf("错误：从 %s 下载块 %d 失败: %v\n", targetAddr, i, err)
+					mu.Lock()
+					failedList = append(failedList, idx)
+					mu.Unlock()
+					return
+				}
 
-			_, cm, err := gspC.GetChunk(targetAddr, i, &ck)
-			if err != nil {
-				fmt.Printf("错误：从 %s 下载块 %d 失败: %v\n", targetAddr, i, err)
-				return
-			}
-
-			// 更新本地状态并上报，让别人能发现我有这个块
-			s.AddChunk(i, cm)
-			gspC.ReportChunk("48081", i)
-		}(int64(idx))
+				// 更新本地状态并上报，让别人能发现我有这个块
+				s.AddChunk(i, cm)
+				gspC.ReportChunk("48081", i)
+			}(int64(idx))
+		}
+		wg.Wait()
+		indices = failedList
 	}
-	wg.Wait()
+
 	fmt.Println("下载完毕！")
 }
