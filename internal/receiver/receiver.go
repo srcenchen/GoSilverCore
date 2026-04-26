@@ -44,7 +44,11 @@ func Start(senderAddr string) {
 	})
 	reqReg := codec.Encode(gsp.TypeJSON, jsonReq)
 	controlConn.Write(reqReg)
-	// --- 核心优化：生成并打乱索引序列 ---
+	go func() {
+		// 控制流保活
+		codec.Decode(controlConn)
+	}()
+
 	indices := make([]int64, status.ChunkNum)
 	for i := range indices {
 		indices[i] = int64(i)
@@ -66,7 +70,6 @@ func Start(senderAddr string) {
 			wg.Add(1)
 			limit <- struct{}{}
 
-			// 这里的 idx 是作为参数传入，避免闭包捕获变量的坑（虽然 Go 1.22 已修复，但习惯要好）
 			go func(i int64) {
 				defer wg.Done()
 				defer func() { <-limit }()

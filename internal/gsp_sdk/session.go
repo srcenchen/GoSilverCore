@@ -8,8 +8,8 @@ import (
 	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk/model"
+	"go-silver-core/internal/queue"
 	"go-silver-core/pkg/mempool"
-	"go-silver-core/pkg/queue"
 	"hash/crc32"
 	"log/slog"
 	"math/rand/v2"
@@ -196,12 +196,12 @@ func (s *Session) handle(conn net.Conn) {
 		codec := gsp.Codec{}
 		packet, err := codec.Decode(conn)
 		if err != nil {
-			slog.Error(fmt.Sprintf("接收端 %s 即将断开连接 %s. ", addr, err))
+			slog.Info(fmt.Sprintf("接收端 %s 即将断开连接 %s. ", addr, err))
 			s.CloseConn(conn)
 			return
 		}
 		if err := s.parsePacket(conn, packet); err != nil {
-			slog.Error(fmt.Sprintf("接收端 %s 即将断开连接 %s. ", addr, err))
+			slog.Info(fmt.Sprintf("接收端 %s 即将断开连接 %s. ", addr, err))
 			s.CloseConn(conn)
 			return
 		}

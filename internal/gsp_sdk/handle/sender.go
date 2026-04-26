@@ -6,8 +6,9 @@ import (
 	"go-silver-core/internal/chunk"
 	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk/model"
+	"go-silver-core/internal/queue"
 	"go-silver-core/pkg/mempool"
-	"go-silver-core/pkg/queue"
+	"log/slog"
 	"net"
 	"strings"
 )
@@ -112,6 +113,7 @@ func PeerReg(conn net.Conn, data []byte, tool ToolSession) {
 	_, err = codec.Decode(conn)
 	if err != nil {
 		tool.RemovePeer(strings.Split(conn.RemoteAddr().String(), ":")[0] + ":" + wc.Port)
+		slog.Info("对端下线，尝试清理:" + strings.Split(conn.RemoteAddr().String(), ":")[0] + ":" + wc.Port)
 	}
 
 }
