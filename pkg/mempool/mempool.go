@@ -20,7 +20,7 @@ func (mp *MemPool) Get(size int64) *[]byte {
 		return &p
 	}
 	p := mp.pool.Get().(*[]byte)
-	*p = (*p)[:2]
+	*p = (*p)[:size]
 	return p
 }
 
