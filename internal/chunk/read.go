@@ -15,6 +15,8 @@ func (f *FileChunk) ReadChunk(index int64, buf []byte) (int, error) {
 	if offset+readSize > f.FileStat.Size() {
 		readSize = f.FileStat.Size() - offset
 	}
+	f.ioPermit <- struct{}{}
+	defer func() { <-f.ioPermit }()
 	n, err := f.file.ReadAt(buf[:readSize], offset)
 	if err != nil {
 		return 0, err

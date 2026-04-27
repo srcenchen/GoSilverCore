@@ -14,6 +14,7 @@ type FileChunk struct {
 	FileStat  os.FileInfo
 	chunkSize int64 // 以 Byte 为单位
 	memPool   *mempool.MemPool
+	ioPermit  chan struct{}
 }
 
 // GetChunkNum 获取文件的分块数
@@ -36,5 +37,6 @@ func NewFileChunk(f *os.File, pool *mempool.MemPool) *FileChunk {
 		file:      f,
 		chunkSize: chunkSize,
 		memPool:   pool,
+		ioPermit:  make(chan struct{}, 1),
 	}
 }
