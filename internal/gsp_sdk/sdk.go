@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"go-silver-core/internal/chunk"
+	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk/model"
 	"go-silver-core/pkg/conn_pool"
+	"go-silver-core/pkg/mempool"
 	"hash/crc32"
 )
 
@@ -16,11 +18,12 @@ type GspSdk struct {
 	srvAddr  string
 	codec    gsp.Codec
 	connPool *conn_pool.ConnPool
+	memPool  *mempool.MemPool
 }
 
-func NewGspSdk(srvAddr string) GspSdk {
+func NewGspSdk(srvAddr string, memPool *mempool.MemPool) GspSdk {
 	connPool := conn_pool.NewConnPool(3)
-	return GspSdk{connPool: connPool, srvAddr: srvAddr, codec: gsp.Codec{}}
+	return GspSdk{connPool: connPool, srvAddr: srvAddr, codec: gsp.Codec{}, memPool: memPool}
 }
 
 // GetFileStatus 获取文件状态请求
@@ -31,12 +34,13 @@ func (g *GspSdk) GetFileStatus() (r model.GetFileStatusResp, err error) {
 	}
 	req := model.BaseJson{Operate: "getFileStatus"}
 	reqJson, _ := json.Marshal(req)
-	reqLoad := g.codec.Encode(gsp.TypeJSON, reqJson)
-	if _, err = conn.Write(reqLoad); err != nil {
+	if err = g.codec.EncodeTo(conn, gsp.TypeJSON, reqJson); err != nil {
 		return
 	}
 	// 接收数据信息
-	resp, _ := g.codec.Decode(conn)
+	buf := g.memPool.Get(_const.ChunkSize)
+	defer g.memPool.Put(buf)
+	resp, _ := g.codec.Decode(conn, *buf)
 	fmt.Println(string(resp.Payload))
 	if err = json.Unmarshal(resp.Payload, &r); err != nil {
 		return
@@ -53,11 +57,12 @@ func (g *GspSdk) GetChunk(addr string, i int64, ck *chunk.FileChunk) (r []byte, 
 	}
 	reqG := model.GetChunkReq{Index: i, Operate: "getChunk"}
 	reqJson, _ := json.Marshal(reqG)
-	reqLoad := g.codec.Encode(gsp.TypeJSON, reqJson)
-	if _, err = conn.Write(reqLoad); err != nil {
+	if err = g.codec.EncodeTo(conn, gsp.TypeJSON, reqJson); err != nil {
 		return
 	}
-	resp, err := g.codec.Decode(conn)
+	buf := g.memPool.Get(_const.ChunkSize)
+	defer g.memPool.Put(buf)
+	resp, err := g.codec.Decode(conn, *buf)
 	if err != nil || resp == nil {
 		return nil, 0, fmt.Errorf("接收块信息失败: %v", err)
 	}
@@ -65,7 +70,9 @@ func (g *GspSdk) GetChunk(addr string, i int64, ck *chunk.FileChunk) (r []byte, 
 	if err := json.Unmarshal(resp.Payload, &chunkInfo); err != nil {
 		return nil, 0, fmt.Errorf("解析块信息失败: %v", err)
 	}
-	resp, err = g.codec.Decode(conn)
+	buf2 := g.memPool.Get(_const.ChunkSize)
+	defer g.memPool.Put(buf2)
+	resp, err = g.codec.Decode(conn, *buf2)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -90,8 +97,7 @@ func (g *GspSdk) ReportChunk(localPort string, i int64) error {
 	}
 	reqG := model.ReportChunkReq{Index: i, Operate: "reportChunk", Port: localPort}
 	reqJson, _ := json.Marshal(reqG)
-	reqLoad := g.codec.Encode(gsp.TypeJSON, reqJson)
-	if _, err = conn.Write(reqLoad); err != nil {
+	if err = g.codec.EncodeTo(conn, gsp.TypeJSON, reqJson); err != nil {
 		return err
 	}
 	return nil
@@ -107,11 +113,12 @@ func (g *GspSdk) WantChunk(i int64) (*model.WantChunkResp, error) {
 	}
 	reqG := model.WantChunkReq{Index: i, Operate: "wantChunk"}
 	reqJson, _ := json.Marshal(reqG)
-	reqLoad := g.codec.Encode(gsp.TypeJSON, reqJson)
-	if _, err = conn.Write(reqLoad); err != nil {
+	if err = g.codec.EncodeTo(conn, gsp.TypeJSON, reqJson); err != nil {
 		return nil, err
 	}
-	resp, err := g.codec.Decode(conn)
+	buf := g.memPool.Get(_const.ChunkSize)
+	defer g.memPool.Put(buf)
+	resp, err := g.codec.Decode(conn, *buf)
 	if err != nil {
 		return nil, err
 	}

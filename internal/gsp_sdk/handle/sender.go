@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"go-silver-core/internal/chunk"
+	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk/model"
 	"go-silver-core/internal/queue"
@@ -37,8 +38,7 @@ func GetFileStatus(conn net.Conn, data []byte, tool ToolSession) {
 		ChunkNum:  ck.GetChunkNum(),
 	})
 	codec := gsp.Codec{}
-	data = codec.Encode(gsp.TypeJSON, resp)
-	conn.Write(data)
+	codec.EncodeTo(conn, gsp.TypeJSON, resp)
 }
 
 // WantChunk 想要这个 chunk
@@ -79,8 +79,7 @@ func GetChunk(conn net.Conn, data []byte, tool ToolSession) {
 	has, checkSum := tool.IndexValid(gc.Index)
 	resp, _ := json.Marshal(model.GetChunkResp{Index: gc.Index, Status: has, CheckSum: checkSum})
 	codec := gsp.Codec{}
-	respData := codec.Encode(gsp.TypeJSON, resp)
-	if _, err := conn.Write(respData); err != nil || !has {
+	if err := codec.EncodeTo(conn, gsp.TypeJSON, resp); err != nil || !has {
 		fmt.Println(err)
 		tool.CloseConn(conn)
 		return
@@ -89,13 +88,13 @@ func GetChunk(conn net.Conn, data []byte, tool ToolSession) {
 	// 借用
 	mp := tool.GetMemPool()
 	fileChunk := mp.Get(ck.GetChunkSize())
+	defer mp.Put(fileChunk)
 	n, err := tool.ReadChunk(gc.Index, *fileChunk)
 	if err != nil {
 		tool.CloseConn(conn)
 		return
 	}
-	respData = codec.Encode(gsp.TypeFileChunk, (*fileChunk)[:n])
-	if _, err = conn.Write(respData); err != nil {
+	if err = codec.EncodeTo(conn, gsp.TypeJSON, (*fileChunk)[:n]); err != nil {
 		tool.CloseConn(conn)
 		return
 	}
@@ -110,7 +109,9 @@ func PeerReg(conn net.Conn, data []byte, tool ToolSession) {
 		return
 	}
 	codec := gsp.Codec{}
-	_, err = codec.Decode(conn)
+	buf := tool.GetMemPool().Get(_const.ChunkSize)
+	defer tool.GetMemPool().Put(buf)
+	_, err = codec.Decode(conn, *buf)
 	if err != nil {
 		tool.RemovePeer(strings.Split(conn.RemoteAddr().String(), ":")[0] + ":" + wc.Port)
 		slog.Info("对端下线，尝试清理:" + strings.Split(conn.RemoteAddr().String(), ":")[0] + ":" + wc.Port)

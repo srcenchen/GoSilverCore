@@ -8,18 +8,26 @@ import (
 	"go-silver-core/internal/gsp_sdk"
 	"go-silver-core/internal/gsp_sdk/model"
 	"go-silver-core/pkg/mempool"
+	"log"
 	"math/rand/v2" // 使用 v2 更快更现代
 	"net"
+	"net/http"
 	"os"
 	"sync"
 )
 
 // AI制作的随机模式
 func Start(senderAddr string) {
+	go func() {
+		log.Println("Starting pprof debug server on 0.0.0.0:6061")
+		if err := http.ListenAndServe("0.0.0.0:6061", nil); err != nil {
+			log.Fatalf("pprof server failed: %v", err)
+		}
+	}()
 	mp := mempool.NewMemPool(_const.ChunkSize)
-	s := gsp_sdk.NewGspSession(":48081", &mp)
+	s := gsp_sdk.NewGspSession(":48081", mp)
 	s.Start()
-	gspC := gsp_sdk.NewGspSdk(senderAddr)
+	gspC := gsp_sdk.NewGspSdk(senderAddr, mp)
 	status, err := gspC.GetFileStatus()
 	if err != nil {
 		return
@@ -42,11 +50,11 @@ func Start(senderAddr string) {
 		Operate: "peerReg",
 		Port:    "48081",
 	})
-	reqReg := codec.Encode(gsp.TypeJSON, jsonReq)
-	controlConn.Write(reqReg)
+	codec.EncodeTo(controlConn, gsp.TypeJSON, jsonReq)
 	go func() {
 		// 控制流保活
-		codec.Decode(controlConn)
+		buf := [5]byte{}
+		codec.Decode(controlConn, buf[:])
 	}()
 
 	indices := make([]int64, status.ChunkNum)

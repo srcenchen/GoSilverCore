@@ -7,8 +7,8 @@ type MemPool struct {
 	pool sync.Pool
 }
 
-func NewMemPool(size int64) MemPool {
-	return MemPool{size: size, pool: sync.Pool{New: func() interface{} {
+func NewMemPool(size int64) *MemPool {
+	return &MemPool{size: size, pool: sync.Pool{New: func() interface{} {
 		b := make([]byte, size)
 		return &b
 	}}}
@@ -25,7 +25,7 @@ func (mp *MemPool) Get(size int64) *[]byte {
 }
 
 func (mp *MemPool) Put(p *[]byte) {
-	if int64(len(*p)) > mp.size {
+	if int64(cap(*p)) > mp.size {
 		return
 	}
 	*p = (*p)[:mp.size]
