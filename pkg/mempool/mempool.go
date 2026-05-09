@@ -1,6 +1,8 @@
 package mempool
 
-import "sync"
+import (
+	"sync"
+)
 
 type MemPool struct {
 	size int64

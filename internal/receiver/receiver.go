@@ -8,24 +8,24 @@ import (
 	"go-silver-core/internal/gsp_sdk"
 	"go-silver-core/internal/gsp_sdk/model"
 	"go-silver-core/pkg/mempool"
-	"log"
 	"math/rand/v2" // 使用 v2 更快更现代
 	"net"
-	"net/http"
 	"os"
+	"strconv"
 	"sync"
 )
 
 // AI制作的随机模式
 func Start(senderAddr string) {
-	go func() {
-		log.Println("Starting pprof debug server on 0.0.0.0:6061")
-		if err := http.ListenAndServe("0.0.0.0:6061", nil); err != nil {
-			log.Fatalf("pprof server failed: %v", err)
-		}
-	}()
+	//go func() {
+	//	log.Println("Starting pprof debug server on 0.0.0.0:6061")
+	//	if err := http.ListenAndServe("0.0.0.0:6061", nil); err != nil {
+	//		log.Fatalf("pprof server failed: %v", err)
+	//	}
+	//}()
 	mp := mempool.NewMemPool(_const.ChunkSize)
-	s := gsp_sdk.NewGspSession(":48081", mp)
+	port := rand.IntN(999) + 3000
+	s := gsp_sdk.NewGspSession(":"+strconv.Itoa(port), mp)
 	s.Start()
 	gspC := gsp_sdk.NewGspSdk(senderAddr, mp)
 	status, err := gspC.GetFileStatus()
@@ -48,7 +48,7 @@ func Start(senderAddr string) {
 	codec := gsp.Codec{}
 	jsonReq, _ := json.Marshal(model.PeerRegReq{
 		Operate: "peerReg",
-		Port:    "48081",
+		Port:    strconv.Itoa(port),
 	})
 	codec.EncodeTo(controlConn, gsp.TypeJSON, jsonReq)
 	go func() {
@@ -114,7 +114,7 @@ func Start(senderAddr string) {
 
 				// 更新本地状态并上报，让别人能发现我有这个块
 				s.AddChunk(i, cm)
-				gspC.ReportChunk("48081", i)
+				gspC.ReportChunk(strconv.Itoa(port), i)
 			}(int64(idx))
 		}
 		wg.Wait()
