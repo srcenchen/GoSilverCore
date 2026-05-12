@@ -1,15 +1,11 @@
 package receiver
 
 import (
-	"encoding/json"
 	"fmt"
 	_const "go-silver-core/internal/const"
-	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk"
-	"go-silver-core/internal/gsp_sdk/model"
 	"go-silver-core/pkg/mempool"
 	"math/rand/v2" // 使用 v2 更快更现代
-	"net"
 	"os"
 	"strconv"
 	"sync"
@@ -24,8 +20,8 @@ func Start(senderAddr string) {
 	//	}
 	//}()
 	mp := mempool.NewMemPool(_const.ChunkSize)
-	port := rand.IntN(999) + 3000
-	s := gsp_sdk.NewGspSession(":"+strconv.Itoa(port), mp)
+	peerPort := rand.IntN(999) + 3000
+	s := gsp_sdk.NewGspSession(":"+strconv.Itoa(peerPort), mp)
 	s.Start()
 	gspC := gsp_sdk.NewGspSdk(senderAddr, mp)
 	status, err := gspC.GetFileStatus()
@@ -41,22 +37,9 @@ func Start(senderAddr string) {
 	ck := s.GetChunk()
 
 	// 开一条Peer控制流
-	controlConn, err := net.Dial("tcp", senderAddr)
-	if err != nil {
-		panic("连接服务端失败")
+	if err := gspC.PeerReg(peerPort, s.UUID); err != nil {
+		panic("服务端连接失败")
 	}
-	codec := gsp.Codec{}
-	jsonReq, _ := json.Marshal(model.PeerRegReq{
-		Operate: "peerReg",
-		Port:    strconv.Itoa(port),
-	})
-	codec.EncodeTo(controlConn, gsp.TypeJSON, jsonReq)
-	go func() {
-		// 控制流保活
-		buf := [5]byte{}
-		codec.Decode(controlConn, buf[:])
-	}()
-
 	indices := make([]int64, status.ChunkNum)
 	for i := range indices {
 		indices[i] = int64(i)
@@ -114,7 +97,7 @@ func Start(senderAddr string) {
 
 				// 更新本地状态并上报，让别人能发现我有这个块
 				s.AddChunk(i, cm)
-				gspC.ReportChunk(strconv.Itoa(port), i)
+				gspC.ReportChunk(s.UUID, i)
 			}(int64(idx))
 		}
 		wg.Wait()

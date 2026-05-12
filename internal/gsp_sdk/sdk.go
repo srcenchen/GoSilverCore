@@ -11,6 +11,7 @@ import (
 	"go-silver-core/pkg/conn_pool"
 	"go-silver-core/pkg/mempool"
 	"hash/crc32"
+	"strconv"
 )
 
 // GspSdk 大多数的功能是给 receiver 端调用的
@@ -84,18 +85,17 @@ func (g *GspSdk) GetChunk(addr string, i int64, ck *chunk.FileChunk) (r []byte, 
 	checksum = curChecksum
 	ck.Save(i, resp.Payload)
 	// 归还conn
-
 	return
 }
 
-// ReportChunk 告知服务端，我已经拥有 第 i 块
-func (g *GspSdk) ReportChunk(localPort string, i int64) error {
+// ReportChunk 告知服务端，我是uuid 我已经拥有 第 i 块
+func (g *GspSdk) ReportChunk(uuid string, i int64) error {
 	conn, err := g.connPool.GetConn(g.srvAddr)
 	defer g.connPool.PutConn(g.srvAddr, conn)
 	if err != nil {
 		return err
 	}
-	reqG := model.ReportChunkReq{Index: i, Operate: "reportChunk", Port: localPort}
+	reqG := model.ReportChunkReq{Index: i, Operate: "reportChunk", UUID: uuid}
 	reqJson, _ := json.Marshal(reqG)
 	if err = g.codec.EncodeTo(conn, gsp.TypeJSON, reqJson); err != nil {
 		return err
@@ -131,4 +131,26 @@ func (g *GspSdk) WantChunk(i int64) (*model.WantChunkResp, error) {
 		return nil, errors.New("JSON 解析失败")
 	}
 	return &respJ, nil
+}
+
+// PeerReg Peer 节点注册
+func (g *GspSdk) PeerReg(peerPort int, uuid string) error {
+	controlConn, err := g.connPool.GetConn(g.srvAddr)
+	if err != nil {
+		return err
+	}
+	codec := gsp.Codec{}
+	jsonReq, _ := json.Marshal(model.PeerRegReq{
+		Operate: "peerReg",
+		Port:    strconv.Itoa(peerPort),
+		UUID:    uuid,
+	})
+	codec.EncodeTo(controlConn, gsp.TypeJSON, jsonReq)
+	// 控制流保活
+	go func() {
+		buf := [1]byte{}
+		codec.Decode(controlConn, buf[:])
+		panic("服务端下线")
+	}()
+	return nil
 }

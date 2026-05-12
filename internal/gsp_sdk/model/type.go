@@ -38,10 +38,11 @@ type WantChunkResp struct {
 type ReportChunkReq struct {
 	Operate string `json:"operate"`
 	Index   int64  `json:"index"` // 告知指定的片
-	Port    string `json:"port"`
+	UUID    string `json:"uuid"`
 }
 
 type PeerRegReq struct {
 	Operate string `json:"operate"`
 	Port    string `json:"port"`
+	UUID    string `json:"uuid"`
 }

@@ -15,6 +15,8 @@ import (
 	"net"
 	"os"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 type Peer struct {
@@ -27,29 +29,15 @@ type Peer struct {
 type Session struct {
 	mu            sync.RWMutex
 	lis           net.Listener
+	UUID          string
 	addr          string
-	Peers         map[string]*Peer
+	Peers         map[string]*Peer              // key 是 uuid
 	ChunkOwners   map[int64]map[string]struct{} // 这个块拥有的Peer
 	PeerOwners    map[string]map[int64]struct{} // 这个Peer拥有的块
 	chunkHash     map[int64]uint32              // 块哈希值
 	chunkProvider chunk.FileChunk               // chunk块
 	memPool       *mempool.MemPool
 	queue         *queue2
-}
-
-// RemovePeer 移除 对端
-func (s *Session) RemovePeer(addr string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if cks, ok := s.PeerOwners[addr]; ok {
-		for ckIndex := range cks {
-			if _, ex := s.ChunkOwners[ckIndex][addr]; ex {
-				delete(s.ChunkOwners[ckIndex], addr)
-			}
-		}
-	}
-	delete(s.PeerOwners, addr)
-	delete(s.Peers, addr)
 }
 
 func (s *Session) GetMemPool() *mempool.MemPool {
@@ -67,9 +55,10 @@ func (s *Session) ReadChunk(i int64, buf []byte) (int, error) {
 }
 
 func NewGspSession(addr string, mempool *mempool.MemPool) *Session {
-
+	uuidV7, _ := uuid.NewV7()
 	return &Session{
 		addr:        addr,
+		UUID:        uuidV7.String(),
 		chunkHash:   map[int64]uint32{},
 		ChunkOwners: make(map[int64]map[string]struct{}),
 		Peers:       map[string]*Peer{},
@@ -101,11 +90,15 @@ func (s *Session) BeSendMain(f *os.File) error {
 	ck := chunk.NewFileChunk(f, s.memPool)
 	nums := ck.GetChunkNum()
 	s.chunkProvider = *ck
+	// 把自己也作为一个 Peer
+	s.Peers[s.UUID] = &Peer{
+		connAddr: "",
+	}
 	for i := int64(0); i < nums; i++ {
 		if s.ChunkOwners[i] == nil {
 			s.ChunkOwners[i] = make(map[string]struct{})
 		}
-		s.ChunkOwners[i][""] = struct{}{}
+		s.ChunkOwners[i][s.UUID] = struct{}{}
 	}
 	return nil
 }
@@ -126,24 +119,40 @@ func (s *Session) AddChunk(i int64, checksum uint32) {
 	}
 }
 
-// AddBlockOwner 添加文件拥有
-func (s *Session) AddBlockOwner(i int64, addr string) {
+// AddPeer 对端注册
+func (s *Session) AddPeer(uuid string, addr string) {
+	s.Peers[uuid] = &Peer{
+		connAddr: addr,
+	}
+}
+
+// RemovePeer 移除 对端
+func (s *Session) RemovePeer(uuid string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.Peers[addr]; !ok {
-		s.Peers[addr] = &Peer{
-			connAddr: addr,
-			connNum:  0,
+	if cks, ok := s.PeerOwners[uuid]; ok {
+		for ckIndex := range cks {
+			if _, ex := s.ChunkOwners[ckIndex][uuid]; ex {
+				delete(s.ChunkOwners[ckIndex], uuid)
+			}
 		}
 	}
+	delete(s.PeerOwners, uuid)
+	delete(s.Peers, uuid)
+}
+
+// AddBlockOwner 添加文件拥有
+func (s *Session) AddBlockOwner(i int64, uuid string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.ChunkOwners[i] == nil {
 		s.ChunkOwners[i] = make(map[string]struct{})
 	}
-	if s.PeerOwners[addr] == nil {
-		s.PeerOwners[addr] = make(map[int64]struct{})
+	if s.PeerOwners[uuid] == nil {
+		s.PeerOwners[uuid] = make(map[int64]struct{})
 	}
-	s.PeerOwners[addr][i] = struct{}{}
-	s.ChunkOwners[i][addr] = struct{}{}
+	s.PeerOwners[uuid][i] = struct{}{}
+	s.ChunkOwners[i][uuid] = struct{}{}
 }
 
 // TODO 测试用队列
@@ -154,17 +163,17 @@ type queue2 struct {
 func (q *queue2) Want(i int64, conn net.Conn) {
 	// 如果只有自己直接把自己发出去
 	c := gsp.Codec{}
-	targetAddr := ""
-	for addr := range q.s.ChunkOwners[i] {
-		if addr == "" {
+	targetUUID := q.s.UUID
+	for uid := range q.s.ChunkOwners[i] {
+		if uid == q.s.UUID {
 			continue
 		}
-		targetAddr = addr
+		targetUUID = uid
 		break
 	}
 	jc, _ := json.Marshal(model.WantChunkResp{
 		Index:    i,
-		Addr:     targetAddr,
+		Addr:     q.s.Peers[targetUUID].connAddr,
 		CheckSum: 0,
 	})
 	err := c.EncodeTo(conn, gsp.TypeJSON, jc)

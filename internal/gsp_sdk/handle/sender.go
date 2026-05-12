@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"go-silver-core/internal/chunk"
-	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk/model"
 	"go-silver-core/internal/queue"
@@ -24,8 +23,9 @@ type ToolSession interface {
 	GetChunk() chunk.FileChunk
 	GetMemPool() *mempool.MemPool
 	GetQueue() queue.DownloadQueue
-	AddBlockOwner(i int64, addr string)
+	AddBlockOwner(i int64, uuid string)
 	RemovePeer(addr string)
+	AddPeer(uuid string, addr string)
 }
 
 // GetFileStatus 获取文件信息
@@ -61,8 +61,7 @@ func ReportChunk(conn net.Conn, data []byte, tool ToolSession) {
 		tool.CloseConn(conn)
 		return
 	}
-	ip := strings.Split(conn.RemoteAddr().String(), ":")[0]
-	tool.AddBlockOwner(wc.Index, ip+":"+wc.Port)
+	tool.AddBlockOwner(wc.Index, wc.UUID)
 }
 
 // GetChunk 处理获取指定片的请求处理
@@ -100,7 +99,7 @@ func GetChunk(conn net.Conn, data []byte, tool ToolSession) {
 	}
 }
 
-// PeerReg 想要这个 chunk
+// PeerReg 对端注册
 func PeerReg(conn net.Conn, data []byte, tool ToolSession) {
 	var wc model.PeerRegReq
 	err := json.Unmarshal(data, &wc)
@@ -108,13 +107,14 @@ func PeerReg(conn net.Conn, data []byte, tool ToolSession) {
 		tool.CloseConn(conn)
 		return
 	}
+	slog.Info("对端注册")
+	tool.AddPeer(wc.UUID, strings.Split(conn.RemoteAddr().String(), ":")[0]+":"+wc.Port)
 	codec := gsp.Codec{}
-	buf := tool.GetMemPool().Get(_const.ChunkSize)
+	buf := tool.GetMemPool().Get(1)
 	defer tool.GetMemPool().Put(buf)
 	_, err = codec.Decode(conn, *buf)
 	if err != nil {
-		tool.RemovePeer(strings.Split(conn.RemoteAddr().String(), ":")[0] + ":" + wc.Port)
+		tool.RemovePeer(wc.UUID)
 		slog.Info("对端下线，尝试清理:" + strings.Split(conn.RemoteAddr().String(), ":")[0] + ":" + wc.Port)
 	}
-
 }
