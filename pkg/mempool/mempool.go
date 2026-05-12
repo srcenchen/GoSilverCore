@@ -1,35 +1,45 @@
 package mempool
 
-import (
-	"sync"
-)
-
 type MemPool struct {
 	size int64
-	pool sync.Pool
+	// 使用 chan 代替 sync.Pool 来实现硬上限
+	ch chan *[]byte
 }
 
 func NewMemPool(size int64) *MemPool {
-	return &MemPool{size: size, pool: sync.Pool{New: func() interface{} {
-		b := make([]byte, size)
-		return &b
-	}}}
+	poolCount := 50
+	m := &MemPool{
+		size: size,
+		ch:   make(chan *[]byte, poolCount),
+	}
+	for i := 0; i < poolCount; i++ {
+		t := make([]byte, size)
+		m.ch <- &t
+	}
+	return m
 }
 
 func (mp *MemPool) Get(size int64) *[]byte {
+	// 非合法大小
 	if size > mp.size {
-		p := make([]byte, size)
-		return &p
+		t := make([]byte, size)
+		return &t
 	}
-	p := mp.pool.Get().(*[]byte)
-	*p = (*p)[:size]
-	return p
+	t := <-mp.ch
+	p := (*t)[:size]
+	return &p
 }
 
 func (mp *MemPool) Put(p *[]byte) {
-	if int64(cap(*p)) > mp.size {
+	// 检查大小是否正确
+	if p == nil || int64(cap(*p)) != mp.size {
 		return
 	}
+	// 恢复长度，写回 Channel 供其他线程复用
 	*p = (*p)[:mp.size]
-	mp.pool.Put(p)
+	select {
+	case mp.ch <- p:
+	default:
+		// 如果池子满了还往里塞，说明归还逻辑有问题，直接丢弃即可
+	}
 }
