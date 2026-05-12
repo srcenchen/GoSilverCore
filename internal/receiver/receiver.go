@@ -3,61 +3,93 @@ package receiver
 import (
 	"fmt"
 	_const "go-silver-core/internal/const"
-	"go-silver-core/internal/gsp_sdk"
+	"go-silver-core/internal/gsp_sdk/client"
+	"go-silver-core/internal/gsp_sdk/server"
 	"go-silver-core/pkg/mempool"
-	"math/rand/v2" // 使用 v2 更快更现代
+	"math/rand/v2"
 	"os"
 	"strconv"
 	"sync"
+	"time"
+
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 )
 
-// AI制作的随机模式
 func Start(senderAddr string) {
-	//go func() {
-	//	log.Println("Starting pprof debug server on 0.0.0.0:6061")
-	//	if err := http.ListenAndServe("0.0.0.0:6061", nil); err != nil {
-	//		log.Fatalf("pprof server failed: %v", err)
-	//	}
-	//}()
+	// 1. 初始化内存池和基础 Session
 	mp := mempool.NewMemPool(_const.ChunkSize)
 	peerPort := rand.IntN(999) + 3000
-	s := gsp_sdk.NewGspSession(":"+strconv.Itoa(peerPort), mp)
+	s := server.NewGspSession(":"+strconv.Itoa(peerPort), mp)
 	s.Start()
-	gspC := gsp_sdk.NewGspSdk(senderAddr, mp)
+
+	// 2. 初始化 SDK 并获取文件信息
+	gspC := client.NewGspSdk(senderAddr, mp)
 	status, err := gspC.GetFileStatus()
 	if err != nil {
+		fmt.Printf("无法获取文件状态: %v\n", err)
 		return
 	}
+
+	// 3. 初始化进度条容器
+	// 所有发往 p 的内容都会被置于进度条上方
+	p := mpb.New(
+		mpb.WithWidth(64),
+		mpb.WithOutput(os.Stderr), // 进度条通常输出到标准错误流
+	)
+
+	// 4. 创建进度条实例
+	bar := p.AddBar(int64(status.ChunkNum),
+		mpb.PrependDecorators(
+			decor.Name("下载中: "),
+			// 使用 WC 结构代替 W6
+			decor.Percentage(decor.WC{W: 6}),
+		),
+		mpb.AppendDecorators(
+			decor.OnComplete(
+				// 修正：ETA 使用 ET_STYLE_GO 或 ET_STYLE_HHMMSS
+				decor.EwmaETA(decor.ET_STYLE_GO, 60), "完成!",
+			),
+		),
+	)
+
+	// 准备本地文件
 	f, err := os.Create("gs-" + status.FileName)
 	if err != nil {
-		panic("文件创建失败")
+		fmt.Fprintf(p, "文件创建失败: %v\n", err)
+		return
 	}
+	defer f.Close()
 	f.Truncate(status.FileSize)
 	s.BeSendSub(f)
 	ck := s.GetChunk()
 
-	// 开一条Peer控制流
+	// Peer 注册
 	if err := gspC.PeerReg(peerPort, s.UUID); err != nil {
-		panic("服务端连接失败")
+		fmt.Fprintf(p, "服务端连接失败: %v\n", err)
+		return
 	}
+
+	// 准备分块索引
 	indices := make([]int64, status.ChunkNum)
 	for i := range indices {
 		indices[i] = int64(i)
 	}
 
-	// 使用 PCG 算法打乱，保证每个节点的起始分块大概率不同
+	// 随机打乱分块顺序，优化 P2P 分发效率
 	rand.Shuffle(len(indices), func(i, j int) {
 		indices[i], indices[j] = indices[j], indices[i]
 	})
+
 	// ---------------------------------
+	// 主循环：直到所有块下载成功
 	for len(indices) > 0 {
-		mu := sync.Mutex{}
+		var mu sync.Mutex
 		var failedList []int64
 		var wg sync.WaitGroup
-		limit := make(chan struct{}, 5)
+		limit := make(chan struct{}, 5) // 控制并发数
 
 		for _, idx := range indices {
-			//idx := 1
 			wg.Add(1)
 			limit <- struct{}{}
 
@@ -65,44 +97,59 @@ func Start(senderAddr string) {
 				defer wg.Done()
 				defer func() { <-limit }()
 
-				fmt.Printf("申请 %d / %d 块中...\n", i+1, status.ChunkNum)
+				// ⚠️ 关键点：使用 fmt.Fprintf(p, ...) 代替 fmt.Printf
+				// 这会通知 mpb 重新计算进度条位置，确保日志不覆盖条
+				fmt.Fprintf(p, "[任务] 正在申请第 %d / %d 块...\n", i+1, status.ChunkNum)
 
-				// 向 Tracker/主服务器询问谁有这个块
+				// 询问 Tracker 块位置
 				reChunk, err := gspC.WantChunk(i)
 				if err != nil {
-					// 实际项目中这里建议增加重试，而不是直接 panic
-					fmt.Printf("警告：请求块 %d 失败: %v\n", i, err)
+					fmt.Fprintf(p, "[警告] 请求块 %d 失败: %v\n", i, err)
 					mu.Lock()
-					failedList = append(failedList, idx)
+					failedList = append(failedList, i)
 					mu.Unlock()
 					return
 				}
 
-				// 如果没人有，则回退到主服务器
 				targetAddr := reChunk.Addr
 				if targetAddr == "" {
 					targetAddr = senderAddr
 				}
 
-				fmt.Printf("申请 %d / %d 块成功，对端地址 %s 下载中...\n", i+1, status.ChunkNum, targetAddr)
-
+				// 开始下载
+				tBegin := time.Now()
 				_, cm, err := gspC.GetChunk(targetAddr, i, &ck)
 				if err != nil {
-					fmt.Printf("错误：从 %s 下载块 %d 失败: %v\n", targetAddr, i, err)
+					fmt.Fprintf(p, "[错误] 从 %s 下载块 %d 失败: %v\n", targetAddr, i, err)
 					mu.Lock()
-					failedList = append(failedList, idx)
+					failedList = append(failedList, i)
 					mu.Unlock()
 					return
 				}
 
-				// 更新本地状态并上报，让别人能发现我有这个块
+				// 计算下载速度 (字节/微秒 * 8 = Mb/s)
+				duration := time.Since(tBegin).Microseconds()
+				var speedMbps int64 = 0
+				if duration > 0 {
+					speedMbps = (_const.ChunkSize / duration) * 8
+				}
+
+				fmt.Fprintf(p, "[成功] 块 %d 下载完毕 | 速度: %d Mb/s | 来自: %s\n", i, speedMbps, targetAddr)
+
+				// 5. 更新进度条状态
+				bar.Increment()
+
+				// 上报状态
 				s.AddChunk(i, cm)
 				gspC.ReportChunk(s.UUID, i)
-			}(int64(idx))
+				gspC.ReportPeer(s.UUID, speedMbps)
+			}(idx)
 		}
 		wg.Wait()
-		indices = failedList
+		indices = failedList // 如果有失败的块，进入下一轮重试
 	}
 
-	fmt.Println("下载完毕！")
+	// 6. 确保进度条渲染完成并退出渲染循环
+	p.Wait()
+	fmt.Println("\n🎉 下载任务已圆满完成！")
 }

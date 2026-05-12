@@ -1,16 +1,12 @@
-package gsp_sdk
+package server
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"go-silver-core/internal/chunk"
 	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/gsp"
-	"go-silver-core/internal/gsp_sdk/model"
-	"go-silver-core/internal/queue"
 	"go-silver-core/pkg/mempool"
-	"hash/crc32"
 	"log/slog"
 	"net"
 	"os"
@@ -22,6 +18,7 @@ import (
 type Peer struct {
 	connAddr string // 连接地址
 	connNum  int    // 连接数
+	maxSpeed int64  // 最大连接速度
 }
 
 // Session 这里是发送端的Session
@@ -40,20 +37,6 @@ type Session struct {
 	queue         *queue2
 }
 
-func (s *Session) GetMemPool() *mempool.MemPool {
-	return s.memPool
-}
-
-// GetChunk 获取块实体
-func (s *Session) GetChunk() chunk.FileChunk {
-	return s.chunkProvider
-}
-
-// ReadChunk 获取Chunk块
-func (s *Session) ReadChunk(i int64, buf []byte) (int, error) {
-	return s.chunkProvider.ReadChunk(i, buf)
-}
-
 func NewGspSession(addr string, mempool *mempool.MemPool) *Session {
 	uuidV7, _ := uuid.NewV7()
 	return &Session{
@@ -67,6 +50,7 @@ func NewGspSession(addr string, mempool *mempool.MemPool) *Session {
 	}
 }
 
+// Start 建立服务端监听
 func (s *Session) Start() error {
 	lis, err := net.Listen("tcp", s.addr)
 	if err != nil {
@@ -110,88 +94,6 @@ func (s *Session) BeSendSub(f *os.File) {
 	return
 }
 
-// AddChunk 添加文件块哈希
-func (s *Session) AddChunk(i int64, checksum uint32) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.chunkHash[i]; !ok {
-		s.chunkHash[i] = checksum
-	}
-}
-
-// AddPeer 对端注册
-func (s *Session) AddPeer(uuid string, addr string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.Peers[uuid] = &Peer{
-		connAddr: addr,
-	}
-}
-
-// RemovePeer 移除 对端
-func (s *Session) RemovePeer(uuid string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if cks, ok := s.PeerOwners[uuid]; ok {
-		for ckIndex := range cks {
-			if _, ex := s.ChunkOwners[ckIndex][uuid]; ex {
-				delete(s.ChunkOwners[ckIndex], uuid)
-			}
-		}
-	}
-	delete(s.PeerOwners, uuid)
-	delete(s.Peers, uuid)
-}
-
-// AddBlockOwner 添加文件拥有
-func (s *Session) AddBlockOwner(i int64, uuid string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.ChunkOwners[i] == nil {
-		s.ChunkOwners[i] = make(map[string]struct{})
-	}
-	if s.PeerOwners[uuid] == nil {
-		s.PeerOwners[uuid] = make(map[int64]struct{})
-	}
-	s.PeerOwners[uuid][i] = struct{}{}
-	s.ChunkOwners[i][uuid] = struct{}{}
-}
-
-// TODO 测试用队列
-type queue2 struct {
-	s *Session
-}
-
-func (q *queue2) Want(i int64, conn net.Conn) {
-	// 如果只有自己直接把自己发出去
-	c := gsp.Codec{}
-	targetUUID := q.s.UUID
-	for uid := range q.s.ChunkOwners[i] {
-		if uid == q.s.UUID {
-			continue
-		}
-		targetUUID = uid
-		break
-	}
-	jc, _ := json.Marshal(model.WantChunkResp{
-		Index:    i,
-		Addr:     q.s.Peers[targetUUID].connAddr,
-		CheckSum: 0,
-	})
-	err := c.EncodeTo(conn, gsp.TypeJSON, jc)
-	if err != nil {
-		panic(err)
-	}
-}
-
-// GetQueue 获取队列
-func (s *Session) GetQueue() queue.DownloadQueue {
-	if s.queue == nil {
-		s.queue = &queue2{s: s}
-	}
-	return s.queue
-}
-
 // handle 处理接收端的连接
 func (s *Session) handle(conn net.Conn) {
 	addr := conn.RemoteAddr()
@@ -229,25 +131,6 @@ func (s *Session) parsePacket(conn net.Conn, packet *gsp.Packet) error {
 		return errors.New("接收到无法解析的指令")
 	}
 	return nil
-}
-
-// IndexValid 校验 index 下标这个块是合法的，当前拥有这个块
-// 返回 存在与否、哈希校验值
-func (s *Session) IndexValid(i int64) (bool, uint32) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if v, ok := s.chunkHash[i]; ok {
-		return true, v
-	}
-	if i < 0 || i >= int64(len(s.ChunkOwners)) {
-		return false, 0
-	}
-	buf := s.memPool.Get(_const.ChunkSize)
-	defer s.memPool.Put(buf)
-	c, _ := s.chunkProvider.ReadChunk(i, *buf)
-	cm := crc32.ChecksumIEEE((*buf)[:c])
-	s.chunkHash[i] = cm
-	return true, cm
 }
 
 // CloseConn 关闭连接

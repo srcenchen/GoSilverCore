@@ -34,6 +34,7 @@ type WantChunkResp struct {
 	Index    int64  `json:"index"`    // 申请指定的片
 	Addr     string `json:"addr"`     // 申请的片的Peer地址
 	CheckSum uint32 `json:"checkSum"` // 申请的片的哈希校验值
+	UUID     string `json:"uuid"`     // 对端的UUID信息
 }
 type ReportChunkReq struct {
 	Operate string `json:"operate"`
@@ -45,4 +46,11 @@ type PeerRegReq struct {
 	Operate string `json:"operate"`
 	Port    string `json:"port"`
 	UUID    string `json:"uuid"`
+}
+
+type PeerReportReq struct {
+	Operate string `json:"operate"`
+	UUID    string `json:"uuid"`
+	Status  string `json:"status"`
+	Speed   int64  `json:"speed"`
 }

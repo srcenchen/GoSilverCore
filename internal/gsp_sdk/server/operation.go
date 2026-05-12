@@ -1,9 +1,9 @@
-package gsp_sdk
+package server
 
 import (
 	"encoding/json"
-	"go-silver-core/internal/gsp_sdk/handle"
 	"go-silver-core/internal/gsp_sdk/model"
+	"go-silver-core/internal/gsp_sdk/server/handle"
 	"net"
 )
 
@@ -15,6 +15,7 @@ var Mux = map[string]HandlerFunc{
 	"wantChunk":     handle.WantChunk,
 	"reportChunk":   handle.ReportChunk,
 	"peerReg":       handle.PeerReg,
+	"reportPeer":    handle.PeerReport,
 }
 
 func (s *Session) SenderOperation(conn net.Conn, payload []byte) error {

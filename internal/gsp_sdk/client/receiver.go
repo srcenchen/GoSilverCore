@@ -1,4 +1,4 @@
-package gsp_sdk
+package client
 
 import (
 	"encoding/json"
@@ -8,24 +8,9 @@ import (
 	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk/model"
-	"go-silver-core/pkg/conn_pool"
-	"go-silver-core/pkg/mempool"
 	"hash/crc32"
 	"strconv"
 )
-
-// GspSdk 大多数的功能是给 receiver 端调用的
-type GspSdk struct {
-	srvAddr  string
-	codec    gsp.Codec
-	connPool *conn_pool.ConnPool
-	memPool  *mempool.MemPool
-}
-
-func NewGspSdk(srvAddr string, memPool *mempool.MemPool) GspSdk {
-	connPool := conn_pool.NewConnPool(10)
-	return GspSdk{connPool: connPool, srvAddr: srvAddr, codec: gsp.Codec{}, memPool: memPool}
-}
 
 // GetFileStatus 获取文件状态请求
 func (g *GspSdk) GetFileStatus() (r model.GetFileStatusResp, err error) {
@@ -152,5 +137,25 @@ func (g *GspSdk) PeerReg(peerPort int, uuid string) error {
 		codec.Decode(controlConn, buf[:])
 		panic("服务端下线")
 	}()
+	return nil
+}
+
+// ReportPeer 向服务端发送Peer信息
+func (g *GspSdk) ReportPeer(uuid string, speed int64) error {
+	conn, err := g.connPool.GetConn(g.srvAddr)
+	defer g.connPool.PutConn(g.srvAddr, conn)
+	if err != nil {
+		return err
+	}
+	reqG := model.PeerReportReq{
+		Operate: "reportPeer",
+		UUID:    uuid,
+		Status:  "done",
+		Speed:   speed,
+	}
+	reqJson, _ := json.Marshal(reqG)
+	if err = g.codec.EncodeTo(conn, gsp.TypeJSON, reqJson); err != nil {
+		return err
+	}
 	return nil
 }

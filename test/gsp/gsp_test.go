@@ -3,7 +3,7 @@ package gsp
 import (
 	"go-silver-core/internal/chunk"
 	gsp2 "go-silver-core/internal/gsp"
-	"go-silver-core/internal/gsp_sdk"
+	"go-silver-core/internal/gsp_sdk/server"
 	"io"
 	"log"
 	"net"
@@ -100,7 +100,7 @@ func handleConn(conn net.Conn) {
 }
 
 func TestGspSession(t *testing.T) {
-	session := gsp_sdk.NewGspSession(":58080")
+	session := server.NewGspSession(":58080")
 	err := session.Start()
 	if err != nil {
 		t.Fatal(err)

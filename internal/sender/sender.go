@@ -2,7 +2,7 @@ package sender
 
 import (
 	_const "go-silver-core/internal/const"
-	"go-silver-core/internal/gsp_sdk"
+	"go-silver-core/internal/gsp_sdk/server"
 	"go-silver-core/pkg/mempool"
 	"log"
 	"log/slog"
@@ -20,7 +20,7 @@ func Start(filePath string) {
 		}
 	}()
 	mp := mempool.NewMemPool(_const.ChunkSize)
-	s := gsp_sdk.NewGspSession(":48080", mp)
+	s := server.NewGspSession(":48080", mp)
 	s.Start()
 	f, err := os.Open(filePath)
 	if err != nil {

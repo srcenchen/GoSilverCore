@@ -26,6 +26,7 @@ type ToolSession interface {
 	AddBlockOwner(i int64, uuid string)
 	RemovePeer(addr string)
 	AddPeer(uuid string, addr string)
+	UpdatePeer(uuid string, speed int64)
 }
 
 // GetFileStatus 获取文件信息
@@ -117,4 +118,17 @@ func PeerReg(conn net.Conn, data []byte, tool ToolSession) {
 		tool.RemovePeer(wc.UUID)
 		slog.Info("对端下线，尝试清理:" + strings.Split(conn.RemoteAddr().String(), ":")[0] + ":" + wc.Port)
 	}
+}
+
+// PeerReport 对端信息上报
+func PeerReport(conn net.Conn, data []byte, tool ToolSession) {
+	var wc model.PeerReportReq
+	err := json.Unmarshal(data, &wc)
+	if err != nil {
+		tool.CloseConn(conn)
+		return
+	}
+	slog.Info(fmt.Sprintf("对端状态返回：设备UUID: %s Speed: %d mb/s", wc.UUID, wc.Speed))
+	// TODO 这里没有处理Status
+	tool.UpdatePeer(wc.UUID, wc.Speed)
 }
