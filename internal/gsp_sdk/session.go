@@ -121,6 +121,8 @@ func (s *Session) AddChunk(i int64, checksum uint32) {
 
 // AddPeer 对端注册
 func (s *Session) AddPeer(uuid string, addr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.Peers[uuid] = &Peer{
 		connAddr: addr,
 	}
