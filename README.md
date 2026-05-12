@@ -70,7 +70,7 @@ GoSilver-Core 的愿景是：**在局域网中，只要有一台机器拥有完�
                     │  Chunk 系统      │                    │   ConnPool      │
                     │  internal/chunk  │                    │ internal/conn_pool│
                     │  • 分块读写      │                    │  • 连接池复用    │
-                    │  • 8MB/chunk    │                    │  • 每地址 3 连接 │
+                    │  • 8MB/chunk    │                    │  • 每地址 10 连接 │
                     └─────────────────┘                    └─────────────────┘
                              │
                              ▼
@@ -116,7 +116,7 @@ go-silver-core/
 │       └── sender.go            # 发送服务启动
 ├── pkg/
 │   ├── mempool/                # 内存池
-│   │   └── mempool.go          # sync.Pool 实现
+│   │   └── mempool.go          # chan 实现，固定 50 缓冲区
 │   └── queue/                  # 下载队列
 │       ├── queue.go            # DownloadQueue 接口
 │       └── README.md
@@ -201,7 +201,7 @@ go run cmd/main.go -mode=receiver -senderAddr=192.168.1.10:48080
 | 项目 | 值 |
 |------|-----|
 | 分块大小 | 8MB |
-| 单地址最大连接数 | 3 |
+| 单地址最大连接数 | 10 |
 | 并发下载数 | 5（可配置） |
 | 默认 Sender 端口 | 48080 |
 | 默认 Receiver 端口 | 48081 |
