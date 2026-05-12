@@ -21,7 +21,7 @@ func (q *queue2) Want(i int64, conn net.Conn) {
 
 	var bestUUID string
 	var maxScore float64 = -1.0
-
+	const baseWeight = 10.0
 	// 1. 遍历所有拥有此分块的 Peer
 	owners := q.s.ChunkOwners[i]
 	if len(owners) == 0 {
@@ -29,7 +29,6 @@ func (q *queue2) Want(i int64, conn net.Conn) {
 		bestUUID = q.s.UUID
 	} else {
 		for uid := range owners {
-			// 跳过自己
 			if uid == q.s.UUID {
 				continue
 			}
@@ -39,9 +38,10 @@ func (q *queue2) Want(i int64, conn net.Conn) {
 				continue
 			}
 
-			// 2. 核心算法：计算该 Peer 的综合得分
-			// 逻辑：速度越快、连接数越少，得分越高
-			score := float64(peer.maxSpeed) / float64(peer.connNum+1)
+			// 核心算法：基础权重+实际速度 / (连接数+1)的平方
+			// 使用平方来快速衰减高并发节点的分数
+			denominator := float64(peer.connNum + 1)
+			score := (baseWeight + float64(peer.maxSpeed)) / (denominator * denominator)
 
 			if score > maxScore {
 				maxScore = score
