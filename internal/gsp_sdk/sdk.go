@@ -22,7 +22,7 @@ type GspSdk struct {
 }
 
 func NewGspSdk(srvAddr string, memPool *mempool.MemPool) GspSdk {
-	connPool := conn_pool.NewConnPool(3)
+	connPool := conn_pool.NewConnPool(10)
 	return GspSdk{connPool: connPool, srvAddr: srvAddr, codec: gsp.Codec{}, memPool: memPool}
 }
 
