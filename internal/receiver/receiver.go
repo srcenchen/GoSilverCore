@@ -152,4 +152,5 @@ func Start(senderAddr string) {
 	// 6. 确保进度条渲染完成并退出渲染循环
 	p.Wait()
 	fmt.Println("\n🎉 下载任务已圆满完成！")
+	select {}
 }

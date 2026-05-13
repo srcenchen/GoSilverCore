@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"go-silver-core/internal/chunk"
-	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/gsp"
 	"go-silver-core/pkg/mempool"
 	"log/slog"
@@ -101,24 +100,20 @@ func (s *Session) handle(conn net.Conn) {
 	s.mu.Unlock()
 	slog.Info("与接收端的连接已经建立 " + addr.String())
 	defer s.CloseConn(conn)
-
+	buf := make([]byte, 64*(1<<10))
 	for {
 		codec := gsp.Codec{}
-		buf := s.memPool.Get(_const.ChunkSize)
-		packet, err := codec.Decode(conn, *buf)
+		packet, err := codec.Decode(conn, buf)
 		if err != nil {
 			slog.Info(fmt.Sprintf("接收端 %s 即将断开连接 %s. ", addr, err))
 			s.CloseConn(conn)
-			s.memPool.Put(buf)
 			return
 		}
 		if err := s.parsePacket(conn, packet); err != nil {
 			slog.Info(fmt.Sprintf("接收端 %s 即将断开连接 %s. ", addr, err))
 			s.CloseConn(conn)
-			s.memPool.Put(buf)
 			return
 		}
-		s.memPool.Put(buf)
 	}
 }
 

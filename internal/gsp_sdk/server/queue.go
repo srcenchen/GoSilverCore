@@ -60,7 +60,7 @@ func (q *queue2) Want(i int64, conn net.Conn) {
 	var targetAddr string
 	if !ok || bestUUID == q.s.UUID {
 		bestUUID = q.s.UUID
-		targetAddr = q.s.addr // Session 自身的地址
+		targetAddr = "" // Session 自身的地址
 	} else {
 		targetAddr = targetPeer.connAddr
 	}
