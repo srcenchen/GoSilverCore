@@ -45,6 +45,7 @@ func (cp *ConnPool) PutConn(addr string, conn net.Conn) {
 	cp.mu.Lock()
 	ch, ok := cp.conn[addr]
 	if !ok {
+		cp.mu.Unlock()
 		return
 	}
 	cp.mu.Unlock()

@@ -9,6 +9,8 @@ import (
 	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk/model"
 	"hash/crc32"
+	"log"
+	"net"
 	"strconv"
 )
 
@@ -18,6 +20,7 @@ func (g *GspSdk) GetFileStatus() (r model.GetFileStatusResp, err error) {
 	if err != nil {
 		return
 	}
+	defer g.connPool.PutConn(g.srvAddr, conn)
 	req := model.BaseJson{Operate: "getFileStatus"}
 	reqJson, _ := json.Marshal(req)
 	if err = g.codec.EncodeTo(conn, gsp.TypeJSON, reqJson); err != nil {
@@ -118,9 +121,12 @@ func (g *GspSdk) WantChunk(i int64) (*model.WantChunkResp, error) {
 	return &respJ, nil
 }
 
-// PeerReg Peer 节点注册
+// PeerReg Peer 节点注册。
+// 使用独立的长连接（不归还连接池），保持该连接存活 = 本节点在 Tracker 上注册存活。
+// 连接断开时 Tracker 自动清理此 Peer 的所有分块记录。
 func (g *GspSdk) PeerReg(peerPort int, uuid string) error {
-	controlConn, err := g.connPool.GetConn(g.srvAddr)
+	// 直接拨号，不从连接池借，避免耗尽连接池供其他操作使用
+	controlConn, err := net.Dial("tcp", g.srvAddr)
 	if err != nil {
 		return err
 	}
@@ -130,28 +136,33 @@ func (g *GspSdk) PeerReg(peerPort int, uuid string) error {
 		Port:    strconv.Itoa(peerPort),
 		UUID:    uuid,
 	})
-	codec.EncodeTo(controlConn, gsp.TypeJSON, jsonReq)
-	// 控制流保活
+	if err := codec.EncodeTo(controlConn, gsp.TypeJSON, jsonReq); err != nil {
+		controlConn.Close()
+		return err
+	}
+	// 持有控制连接直到 Tracker 关闭，保活用。
 	go func() {
+		defer controlConn.Close()
 		buf := [1]byte{}
-		codec.Decode(controlConn, buf[:])
-		panic("服务端下线")
+		_, _ = codec.Decode(controlConn, buf[:])
+		log.Println("[client] 与分发服务端控制连接断开")
 	}()
 	return nil
 }
 
-// ReportPeer 向服务端发送Peer信息
-func (g *GspSdk) ReportPeer(uuid string, speed int64) error {
+// ReportPeer 向服务端发送Peer信息，包括提供下载的对端UUID和本次状态
+func (g *GspSdk) ReportPeer(uuid string, providerUuid string, speed int64, status string) error {
 	conn, err := g.connPool.GetConn(g.srvAddr)
 	defer g.connPool.PutConn(g.srvAddr, conn)
 	if err != nil {
 		return err
 	}
 	reqG := model.PeerReportReq{
-		Operate: "reportPeer",
-		UUID:    uuid,
-		Status:  "done",
-		Speed:   speed,
+		Operate:      "reportPeer",
+		UUID:         uuid,
+		ProviderUUID: providerUuid,
+		Status:       status,
+		Speed:        speed,
 	}
 	reqJson, _ := json.Marshal(reqG)
 	if err = g.codec.EncodeTo(conn, gsp.TypeJSON, reqJson); err != nil {

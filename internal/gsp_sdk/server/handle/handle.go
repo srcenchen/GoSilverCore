@@ -26,7 +26,10 @@ type ToolSession interface {
 	AddBlockOwner(i int64, uuid string)
 	RemovePeer(addr string)
 	AddPeer(uuid string, addr string)
-	UpdatePeer(uuid string, speed int64)
+	UpdatePeer(providerUuid string, speed int64, failed bool)
+	IsMain() bool
+	AcquireUploadSlot() error
+	ReleaseUploadSlot()
 }
 
 // GetFileStatus 获取文件信息
@@ -84,8 +87,17 @@ func GetChunk(conn net.Conn, data []byte, tool ToolSession) {
 		tool.CloseConn(conn)
 		return
 	}
+	
+	// 如果是发送主机（主节点），需要限流控制以防止局域网高并发冲垮磁盘或网络带宽
+	if tool.IsMain() {
+		if err := tool.AcquireUploadSlot(); err != nil {
+			tool.CloseConn(conn)
+			return
+		}
+		defer tool.ReleaseUploadSlot()
+	}
+
 	// 发送回应结束，开始发送数据块
-	// 借用
 	mp := tool.GetMemPool()
 	fileChunk := mp.Get(ck.GetChunkSize())
 	defer mp.Put(fileChunk)
@@ -94,7 +106,8 @@ func GetChunk(conn net.Conn, data []byte, tool ToolSession) {
 		tool.CloseConn(conn)
 		return
 	}
-	if err = codec.EncodeTo(conn, gsp.TypeJSON, (*fileChunk)[:n]); err != nil {
+	// 文件块数据应当以 TypeFileChunk (0x02) 发送
+	if err = codec.EncodeTo(conn, gsp.TypeFileChunk, (*fileChunk)[:n]); err != nil {
 		tool.CloseConn(conn)
 		return
 	}
@@ -128,7 +141,8 @@ func PeerReport(conn net.Conn, data []byte, tool ToolSession) {
 		tool.CloseConn(conn)
 		return
 	}
-	slog.Info(fmt.Sprintf("对端状态返回：设备UUID: %s Speed: %d mb/s", wc.UUID, wc.Speed))
-	// TODO 这里没有处理Status
-	tool.UpdatePeer(wc.UUID, wc.Speed)
+	slog.Info(fmt.Sprintf("对端状态返回：设备UUID: %s ProviderUUID: %s Speed: %d mb/s Status: %s", wc.UUID, wc.ProviderUUID, wc.Speed, wc.Status))
+	if wc.ProviderUUID != "" {
+		tool.UpdatePeer(wc.ProviderUUID, wc.Speed, wc.Status == "failed")
+	}
 }

@@ -15,9 +15,10 @@ import (
 )
 
 type Peer struct {
-	connAddr string // 连接地址
-	connNum  int    // 连接数
-	maxSpeed int64  // 最大连接速度
+	connAddr  string // 连接地址
+	connNum   int    // 当前活跃连接数（调度时递增，完成/失败后递减）
+	maxSpeed  int64  // 历史最大速度 Mbps
+	failCount int    // 连续失败次数；成功后清零，用于调度降权
 }
 
 // Session 这里是发送端的Session
@@ -34,6 +35,9 @@ type Session struct {
 	chunkProvider chunk.FileChunk               // chunk块
 	memPool       *mempool.MemPool
 	queue         *queue2
+	isMain        bool                          // 是否为主发送端
+	done          chan struct{}                 // 关闭通道
+	uploadSem     chan struct{}                 // 并发上传限制 (限流信号量)
 }
 
 func NewGspSession(addr string, mempool *mempool.MemPool) *Session {
@@ -46,6 +50,8 @@ func NewGspSession(addr string, mempool *mempool.MemPool) *Session {
 		Peers:       map[string]*Peer{},
 		PeerOwners:  make(map[string]map[int64]struct{}),
 		memPool:     mempool,
+		done:        make(chan struct{}),
+		uploadSem:   make(chan struct{}, 5), // 限制最大 5 个并发上传
 	}
 }
 
@@ -60,7 +66,13 @@ func (s *Session) Start() error {
 		for {
 			conn, err := lis.Accept()
 			if err != nil {
-				slog.Error("与接收端建立连接失败")
+				select {
+				case <-s.done:
+					return // 正常停止
+				default:
+				}
+				slog.Error("与接收端建立连接失败: " + err.Error())
+				return // 出现非正常错误时退出，防止 CPU 空转和 nil 指针崩溃
 			}
 			go s.handle(conn)
 		}
@@ -68,11 +80,28 @@ func (s *Session) Start() error {
 	return nil
 }
 
+// Stop 停止监听并关闭所有连接
+func (s *Session) Stop() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	select {
+	case <-s.done:
+		// 已经关闭
+	default:
+		close(s.done)
+	}
+	if s.lis != nil {
+		_ = s.lis.Close()
+		s.lis = nil
+	}
+}
+
 // BeSendMain 作为发送主机
 func (s *Session) BeSendMain(f *os.File) error {
 	ck := chunk.NewFileChunk(f, s.memPool)
 	nums := ck.GetChunkNum()
 	s.chunkProvider = *ck
+	s.isMain = true
 	// 把自己也作为一个 Peer
 	s.Peers[s.UUID] = &Peer{
 		connAddr: "",
