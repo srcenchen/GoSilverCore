@@ -110,6 +110,8 @@ func (q *queue2) Want(i int64, conn net.Conn) {
 	} else {
 		targetAddr = targetPeer.connAddr
 	}
+	// 若已缓存该块的校验值则一并返回，供接收端在下载前预知期望校验和（缺失时为 0，接收端仍会二次 CRC32 校验）
+	checkSum := q.s.chunkHash[i]
 	q.s.mu.RUnlock()
 
 	// 为选定的 Peer 递增活跃连接数
@@ -122,7 +124,7 @@ func (q *queue2) Want(i int64, conn net.Conn) {
 	jc, _ := json.Marshal(model.WantChunkResp{
 		Index:    i,
 		Addr:     targetAddr,
-		CheckSum: 0,
+		CheckSum: checkSum,
 		UUID:     bestUUID,
 	})
 	if err := c.EncodeTo(conn, gsp.TypeJSON, jc); err != nil {
