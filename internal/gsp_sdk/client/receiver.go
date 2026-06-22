@@ -30,7 +30,6 @@ func (g *GspSdk) GetFileStatus() (r model.GetFileStatusResp, err error) {
 	buf := g.memPool.Get(_const.ChunkSize)
 	defer g.memPool.Put(buf)
 	resp, _ := g.codec.Decode(conn, *buf)
-	fmt.Println(string(resp.Payload))
 	if err = json.Unmarshal(resp.Payload, &r); err != nil {
 		return
 	}

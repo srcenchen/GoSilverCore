@@ -23,7 +23,7 @@ import "go-silver-core/pkg/gosilver"
 
 ```go
 type ProgressInfo struct {
-    TotalChunks int64   // 该文件的总分块数 (每个分块默认为 8MB)
+    TotalChunks int64   // 该文件的总分块数 (每个分块默认为 4MB)
     Downloaded  int64   // 当前已完成下载的分块数
     Percentage  float64 // 下载百分比 (0.0 到 100.0)
     SpeedMbps   int64   // 当前下载速度 (Mbps)

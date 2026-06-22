@@ -23,7 +23,7 @@ GoSilver-Core 的愿景是：**在局域网中，只要有一台机器拥有完�
 - **P2P 分发**：下载完成的节点自动成为新的提供者，分担源节点压力
 - **多线程并发下载**：支持多个 chunk 同时下载，加速传输
 - **连接池复用**：TCP 连接池减少连接建立开销
-- **内存池复用**：8MB chunk 缓冲区池化，避免频繁内存分配
+- **内存池复用**：4MB chunk 缓冲区池化，避免频繁内存分配
 - **Checksum 校验**：每个 chunk 使用 CRC32 校验，确保数据完整性
 - **GSP 自定义协议**：轻量级二进制协议，5 字节头部 + payload，简洁高效
 
@@ -70,14 +70,14 @@ GoSilver-Core 的愿景是：**在局域网中，只要有一台机器拥有完�
                     │  Chunk 系统      │                    │   ConnPool      │
                     │  internal/chunk  │                    │ internal/conn_pool│
                     │  • 分块读写      │                    │  • 连接池复用    │
-                    │  • 8MB/chunk    │                    │  • 每地址 10 连接 │
+                    │  • 4MB/chunk    │                    │  • 每地址 10 连接 │
                     └─────────────────┘                    └─────────────────┘
                              │
                              ▼
                     ┌─────────────────┐
                     │  Memory Pool     │
                     │   pkg/mempool    │
-                    │  • 8MB 缓冲池化  │
+                    │  • 4MB 缓冲池化  │
                     └─────────────────┘
 ```
 
@@ -97,7 +97,7 @@ go-silver-core/
 │   ├── conn_pool/              # TCP 连接池
 │   │   └── pool.go             # ConnPool 实现
 │   ├── const/
-│   │   └── const.go            # 常量定义（ChunkSize = 8MB）
+│   │   └── const.go            # 常量定义（ChunkSize = 4MB）
 │   ├── gsp/                    # GSP 传输协议
 │   │   ├── codec.go            # 封包/解包（5字节头 + payload）
 │   │   ├── error.go            # 错误定义
@@ -155,7 +155,7 @@ go-silver-core/
 ### Sender 模式（源节点）
 
 1. 启动 TCP 监听（默认端口 48080）
-2. 打开文件，按 8MB 分块
+2. 打开文件，按 4MB 分块
 3. 等待 Receiver 连接
 4. 处理 `getFileStatus`、`wantChunk`、`getChunk`、`reportChunk` 请求
 5. 记录哪个对等方拥有哪个 chunk（`ChunkBlockOwner`）
@@ -200,7 +200,7 @@ go run cmd/main.go -mode=receiver -senderAddr=192.168.1.10:48080
 
 | 项目 | 值 |
 |------|-----|
-| 分块大小 | 8MB |
+| 分块大小 | 4MB |
 | 单地址最大连接数 | 10 |
 | 并发下载数 | 5（可配置） |
 | 默认 Sender 端口 | 48080 |

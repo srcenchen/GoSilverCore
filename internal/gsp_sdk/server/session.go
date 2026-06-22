@@ -125,8 +125,6 @@ func (s *Session) BeSendSub(f *os.File) {
 // handle 处理接收端的连接
 func (s *Session) handle(conn net.Conn) {
 	addr := conn.RemoteAddr()
-	s.mu.Lock()
-	s.mu.Unlock()
 	slog.Info("与接收端的连接已经建立 " + addr.String())
 	defer s.CloseConn(conn)
 	buf := make([]byte, 64*(1<<10))
