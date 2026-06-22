@@ -73,6 +73,40 @@ func (s *Server) Start() error {
 	return nil
 }
 
+// PeerProgress 是一个接收端在本服务端视角下的下载进度（供 UI 渲染节点列表）。
+type PeerProgress struct {
+	UUID       string  // 对端 UUID
+	Addr       string  // 对端地址 ip:port
+	Owned      int64   // 已拥有的分块数
+	Total      int64   // 总分块数
+	Percentage float64 // 进度百分比 0.0~100.0
+	MaxSpeed   int64   // 历史最大速度 Mbps
+}
+
+// Snapshot 返回当前所有接收端（不含自身）的下载进度快照。服务端未启动时返回 nil。
+func (s *Server) Snapshot() []PeerProgress {
+	if s.session == nil {
+		return nil
+	}
+	raw := s.session.Snapshot()
+	out := make([]PeerProgress, 0, len(raw))
+	for _, p := range raw {
+		pct := 0.0
+		if p.Total > 0 {
+			pct = float64(p.Owned) / float64(p.Total) * 100
+		}
+		out = append(out, PeerProgress{
+			UUID:       p.UUID,
+			Addr:       p.Addr,
+			Owned:      p.Owned,
+			Total:      p.Total,
+			Percentage: pct,
+			MaxSpeed:   p.MaxSpeed,
+		})
+	}
+	return out
+}
+
 // Stop 停止服务端监听并关闭文件
 func (s *Server) Stop() {
 	if s.session != nil {
