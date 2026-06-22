@@ -51,6 +51,43 @@ func (a AnnounceInfo) SenderAddr(src net.Addr) string {
 	return net.JoinHostPort(host, strconv.Itoa(a.Port))
 }
 
+// validIPv4 返回该网卡上的一个合法 IPv4 地址，如果没有则返回 nil
+func validIPv4(ifi *net.Interface) net.IP {
+	addrs, _ := ifi.Addrs()
+	for _, addr := range addrs {
+		var ip net.IP
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+			return ip.To4()
+		}
+	}
+	return nil
+}
+
+// getMulticastInterfaces 获取所有支持多播且具有 IPv4 地址并且处于 UP 状态的网卡
+func getMulticastInterfaces() []*net.Interface {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var validIfaces []*net.Interface
+	for i := range ifaces {
+		ifi := &ifaces[i]
+		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		if validIPv4(ifi) != nil {
+			validIfaces = append(validIfaces, ifi)
+		}
+	}
+	return validIfaces
+}
+
 // Announce 周期性向局域网广播分发通告，直到 stop 被关闭。
 // interval <= 0 时使用默认 2s。该函数立即返回，广播在后台协程中进行。
 func Announce(stop <-chan struct{}, info AnnounceInfo, interval time.Duration) error {
@@ -62,21 +99,51 @@ func Announce(stop <-chan struct{}, info AnnounceInfo, interval time.Duration) e
 	if err != nil {
 		return err
 	}
-	conn, err := net.DialUDP("udp4", nil, groupAddr)
-	if err != nil {
-		return err
+
+	ifaces := getMulticastInterfaces()
+	var conns []*net.UDPConn
+
+	for _, ifi := range ifaces {
+		ip := validIPv4(ifi)
+		if ip == nil {
+			continue
+		}
+		// 绑定到网卡的具体 IP，实现多网卡分别发送
+		laddr := &net.UDPAddr{IP: ip, Port: 0}
+		conn, err := net.DialUDP("udp4", laddr, groupAddr)
+		if err == nil {
+			conns = append(conns, conn)
+		}
 	}
+
+	// 如果没有找到合适的网卡或者均失败，退化为系统默认路由发送
+	if len(conns) == 0 {
+		conn, err := net.DialUDP("udp4", nil, groupAddr)
+		if err != nil {
+			return err
+		}
+		conns = append(conns, conn)
+	}
+
 	go func() {
-		defer conn.Close()
+		defer func() {
+			for _, c := range conns {
+				c.Close()
+			}
+		}()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		_, _ = conn.Write(payload) // 立即先发一帧，便于接收端尽快感知
+		for _, c := range conns {
+			_, _ = c.Write(payload) // 立即先发一帧，便于接收端尽快感知
+		}
 		for {
 			select {
 			case <-stop:
 				return
 			case <-ticker.C:
-				_, _ = conn.Write(payload)
+				for _, c := range conns {
+					_, _ = c.Write(payload)
+				}
 			}
 		}
 	}()
@@ -87,7 +154,29 @@ func Announce(stop <-chan struct{}, info AnnounceInfo, interval time.Duration) e
 // handler 在后台协程中被调用，第二个参数是报文源地址（用于 AnnounceInfo.SenderAddr）。
 // 关闭 stop 即可停止监听并释放套接字。该函数立即返回。
 func Listen(stop <-chan struct{}, handler func(AnnounceInfo, net.Addr)) error {
-	conn, err := net.ListenMulticastUDP("udp4", nil, groupAddr)
+	ifaces := getMulticastInterfaces()
+	if len(ifaces) == 0 {
+		// 退化为系统默认多播接口监听
+		return listenOnInterface(nil, stop, handler)
+	}
+
+	var successCount int
+	for _, ifi := range ifaces {
+		err := listenOnInterface(ifi, stop, handler)
+		if err == nil {
+			successCount++
+		}
+	}
+
+	if successCount == 0 {
+		// 如果指定网卡全部失败，尝试退化
+		return listenOnInterface(nil, stop, handler)
+	}
+	return nil
+}
+
+func listenOnInterface(ifi *net.Interface, stop <-chan struct{}, handler func(AnnounceInfo, net.Addr)) error {
+	conn, err := net.ListenMulticastUDP("udp4", ifi, groupAddr)
 	if err != nil {
 		return err
 	}

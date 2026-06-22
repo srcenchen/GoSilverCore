@@ -121,6 +121,7 @@ func Start(senderAddr string) {
 				_, cm, err := gspC.GetChunk(targetAddr, i, &ck)
 				if err != nil {
 					fmt.Fprintf(p, "[错误] 从 %s 下载块 %d 失败: %v\n", targetAddr, i, err)
+					
 					// 上报失败，以扣减提供端的并发连接数
 					_ = gspC.ReportPeer(s.UUID, reChunk.UUID, 0, "failed")
 					mu.Lock()

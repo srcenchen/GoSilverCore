@@ -1,109 +1,51 @@
 package gsp
 
 import (
-	"go-silver-core/internal/chunk"
-	gsp2 "go-silver-core/internal/gsp"
-	"go-silver-core/internal/gsp_sdk/server"
-	"io"
-	"log"
+	"bytes"
 	"net"
-	"os"
-	"strconv"
-	"strings"
 	"testing"
+	"time"
+
+	gsp2 "go-silver-core/internal/gsp"
 )
 
-func TestDecode(t *testing.T) {
-	conn, err := net.Dial("tcp", "localhost:38080")
-	if err != nil {
-		panic(err)
+// TestCodecRoundTrip 自包含地验证 GSP 编解码：通过 net.Pipe 连续编码两种类型的帧，
+// 在对端逐帧解码并校验类型与载荷一致。
+func TestCodecRoundTrip(t *testing.T) {
+	cli, srv := net.Pipe()
+	defer cli.Close()
+	defer srv.Close()
+
+	type frame struct {
+		typ     uint8
+		payload []byte
 	}
-	defer conn.Close()
-	codec := gsp2.Codec{}
-	data, err := codec.Decode(conn)
-	log.Printf("chunkData: %s", string(data.Payload))
-	arr := strings.Split(string(data.Payload), ",")
-	if len(arr) == 2 {
-		blockNum, _ := strconv.ParseInt(arr[0], 10, 64)
-		fileSize, _ := strconv.ParseInt(arr[1], 10, 64)
-		f, _ := os.Create("out.apk")
-		f.Truncate(fileSize)
-		ck := chunk.NewFileChunk(f)
-		for i := int64(0); i < blockNum; i++ {
-			d := codec.Encode(gsp2.TypeJSON, []byte(strconv.FormatInt(i, 10)))
-			_, _ = conn.Write(d)
-			data, err := codec.Decode(conn)
-			if err != nil {
-				if err == io.EOF {
-					log.Println("服务器断开连接")
-				} else {
-					log.Printf("读取协议出错: %v", err)
-				}
-				break
-			}
-			if data.Type == gsp2.TypeFileChunk {
-				ck.Save(i, data.Payload)
-			}
-		}
+	frames := []frame{
+		{gsp2.TypeJSON, []byte(`{"operate":"getFileStatus"}`)},
+		{gsp2.TypeFileChunk, bytes.Repeat([]byte{0xAB}, 4096)},
+		{gsp2.TypeJSON, []byte(``)}, // 空载荷边界
 	}
 
-}
-
-func TestEncode(t *testing.T) {
-	lis, err := net.ListenTCP("tcp", &net.TCPAddr{
-		Port: 38080,
-	})
-	if err != nil {
-		panic("启动端口监听失败" + err.Error())
-	}
-	defer lis.Close()
-	for {
-		conn, err := lis.Accept()
-		if err != nil {
-			panic(err)
-		}
-		go handleConn(conn)
-	}
-}
-
-func handleConn(conn net.Conn) {
-	f, _ := os.Open("test.apk")
-	ck := chunk.NewFileChunk(f)
-	chunkNum := ck.GetChunkNum()
-	codec := gsp2.Codec{}
-
-	// 发送块大小
-	data := codec.Encode(gsp2.TypeJSON, []byte(strconv.FormatInt(chunkNum, 10)+","+strconv.FormatInt(ck.FileStat.Size(), 10)))
-	_, _ = conn.Write(data)
-	// 进入等待块请求模式
 	go func() {
-		for {
-			data, err := codec.Decode(conn)
-			if err != nil {
-				if err == io.EOF {
-					log.Println("服务器断开连接")
-				} else {
-					log.Printf("读取协议出错: %v", err)
-				}
-				break
-			}
-			if data.Type == gsp2.TypeJSON {
-				index, _ := strconv.ParseInt(string(data.Payload), 10, 64)
-				chunkData, _ := ck.ReadChunk(index)
-				d := codec.Encode(gsp2.TypeFileChunk, chunkData)
-				_, _ = conn.Write(d)
-			}
+		c := gsp2.Codec{}
+		for _, f := range frames {
+			_ = c.EncodeTo(cli, f.typ, f.payload)
 		}
 	}()
-	select {}
 
-}
-
-func TestGspSession(t *testing.T) {
-	session := server.NewGspSession(":58080")
-	err := session.Start()
-	if err != nil {
-		t.Fatal(err)
+	c := gsp2.Codec{}
+	buf := make([]byte, 8192)
+	_ = srv.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for i, want := range frames {
+		pkt, err := c.Decode(srv, buf)
+		if err != nil {
+			t.Fatalf("解码第 %d 帧失败: %v", i, err)
+		}
+		if pkt.Type != want.typ {
+			t.Fatalf("帧 %d 类型不符: got %d want %d", i, pkt.Type, want.typ)
+		}
+		if !bytes.Equal(pkt.Payload, want.payload) {
+			t.Fatalf("帧 %d 载荷不符", i)
+		}
 	}
-	select {}
 }

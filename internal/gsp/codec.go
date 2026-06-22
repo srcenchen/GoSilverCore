@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 )
 
 // codec gsp 协议的编解码模块
@@ -38,6 +39,8 @@ func (c *Codec) Decode(r io.Reader, payloadBuf []byte) (*Packet, error) {
 
 // EncodeTo GSP 数据编码
 func (c *Codec) EncodeTo(conn net.Conn, typ uint8, payload []byte) error {
+	conn.SetWriteDeadline(time.Now().Add(60 * time.Second))
+	defer conn.SetWriteDeadline(time.Time{})
 	// 编码帧头
 	header := [5]byte{}
 	header[0] = typ

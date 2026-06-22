@@ -56,11 +56,12 @@ func (q *queue2) Want(i int64, conn net.Conn) {
 
 	q.s.mu.RLock()
 
-	var bestUUID string
-	var maxScore float64 = -1.0
+	var bestUUID string = q.s.UUID
+	// 设置主节点的保底得分为 0.5
+	// 当所有可用子节点的得分（因连续失败或负载过高）降到 0.5 以下时，调度中心将直接派主节点上场兜底
+	var maxScore float64 = 0.5
 	const (
-		baseWeight          = 10.0
-		crossSubnetPenalty  = 0.3 // 跨子网惩罚系数，>0 保证跨子网节点仍可使用
+		baseWeight = 10.0
 	)
 
 	owners := q.s.ChunkOwners[i]
@@ -81,15 +82,14 @@ func (q *queue2) Want(i int64, conn net.Conn) {
 				peerIP = host
 			}
 
-			// 子网系数：同子网满分，跨子网打折但不排除
-			subnetFactor := 1.0
+			// 如果不在同一个子网，直接跳过，不再分配该节点
 			if !isReachableSubnet(reqIP, peerIP) {
-				subnetFactor = crossSubnetPenalty
+				continue
 			}
 
 			// 失败降权：每次连续失败分数减半（failCount+1 作分母）
 			denominator := float64(peer.connNum+1) * float64(peer.failCount+1)
-			score := (baseWeight + float64(peer.maxSpeed)) / (denominator * denominator) * subnetFactor
+			score := (baseWeight + float64(peer.maxSpeed)) / (denominator * denominator)
 
 			if score > maxScore {
 				maxScore = score

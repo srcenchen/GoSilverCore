@@ -26,10 +26,8 @@ type ToolSession interface {
 	AddBlockOwner(i int64, uuid string)
 	RemovePeer(addr string)
 	AddPeer(uuid string, addr string)
-	UpdatePeer(providerUuid string, speed int64, failed bool)
+	UpdatePeer(providerUuid string, speed int64, status string)
 	IsMain() bool
-	AcquireUploadSlot() error
-	ReleaseUploadSlot()
 }
 
 // GetFileStatus 获取文件信息
@@ -80,21 +78,21 @@ func GetChunk(conn net.Conn, data []byte, tool ToolSession) {
 	}
 	// 首先，我们要确认我们拥有这个块，并且块合法
 	has, checkSum := tool.IndexValid(gc.Index)
-	resp, _ := json.Marshal(model.GetChunkResp{Index: gc.Index, Status: has, CheckSum: checkSum})
-	codec := gsp.Codec{}
-	if err := codec.EncodeTo(conn, gsp.TypeJSON, resp); err != nil || !has {
-		fmt.Println(err)
+	if !has {
+		resp, _ := json.Marshal(model.GetChunkResp{Index: gc.Index, Status: false, Msg: "ChunkNotFound"})
+		codec := gsp.Codec{}
+		codec.EncodeTo(conn, gsp.TypeJSON, resp)
 		tool.CloseConn(conn)
 		return
 	}
-	
-	// 如果是发送主机（主节点），需要限流控制以防止局域网高并发冲垮磁盘或网络带宽
-	if tool.IsMain() {
-		if err := tool.AcquireUploadSlot(); err != nil {
-			tool.CloseConn(conn)
-			return
-		}
-		defer tool.ReleaseUploadSlot()
+
+	// 发送回应，表示可以提供分块
+	resp, _ := json.Marshal(model.GetChunkResp{Index: gc.Index, Status: true, CheckSum: checkSum})
+	codec := gsp.Codec{}
+	if err := codec.EncodeTo(conn, gsp.TypeJSON, resp); err != nil {
+		fmt.Println(err)
+		tool.CloseConn(conn)
+		return
 	}
 
 	// 发送回应结束，开始发送数据块
@@ -143,6 +141,6 @@ func PeerReport(conn net.Conn, data []byte, tool ToolSession) {
 	}
 	slog.Info(fmt.Sprintf("对端状态返回：设备UUID: %s ProviderUUID: %s Speed: %d mb/s Status: %s", wc.UUID, wc.ProviderUUID, wc.Speed, wc.Status))
 	if wc.ProviderUUID != "" {
-		tool.UpdatePeer(wc.ProviderUUID, wc.Speed, wc.Status == "failed")
+		tool.UpdatePeer(wc.ProviderUUID, wc.Speed, wc.Status)
 	}
 }

@@ -3,6 +3,7 @@ package conn_pool
 import (
 	"net"
 	"sync"
+	"time"
 )
 
 // ConnPool 连接池
@@ -33,7 +34,7 @@ func (cp *ConnPool) GetConn(addr string) (net.Conn, error) {
 	case conn := <-ch:
 		return conn, nil
 	default:
-		return net.Dial("tcp", addr)
+		return net.DialTimeout("tcp", addr, 5*time.Second)
 	}
 }
 

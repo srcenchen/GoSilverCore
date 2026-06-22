@@ -24,6 +24,17 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+var GlobalLogCh = make(chan string, 1000)
+
+type logLineMsg string
+
+func waitLog() tea.Cmd {
+	return func() tea.Msg {
+		msg := <-GlobalLogCh
+		return logLineMsg(msg)
+	}
+}
+
 // senderGSPPort 是发送端 GSP 监听端口，接收端按通告中的此端口回连。
 const senderGSPPort = 48080
 
@@ -86,6 +97,7 @@ type Model struct {
 	prog   progress.Model
 	status string // 顶部一行状态/错误提示
 	err    error
+	logs   []string
 }
 
 // New 创建一个默认进入接收模式的 TUI 模型。
@@ -98,11 +110,12 @@ func New() *Model {
 		input:      ti,
 		prog:       progress.New(progress.WithDefaultGradient()),
 		announceCh: make(chan announceMsg, 8),
+		logs:       make([]string, 0, 10),
 	}
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.startReceiving(), waitAnnounce(m.announceCh), tick())
+	return tea.Batch(m.startReceiving(), waitAnnounce(m.announceCh), tick(), waitLog())
 }
 
 // ---- 命令 ----
@@ -167,7 +180,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case progressClosedMsg:
 		// 下载协程结束，回到空闲监听
+		m.client = nil
 		return m, nil
+
+	case logLineMsg:
+		m.logs = append(m.logs, string(msg))
+		if len(m.logs) > 10 {
+			m.logs = m.logs[len(m.logs)-10:]
+		}
+		return m, waitLog()
 
 	case tickMsg:
 		if m.mode == modeSendServing && m.server != nil {
@@ -392,9 +413,13 @@ func (m *Model) viewReceive() string {
 		}
 	} else {
 		b += hintStyle.Render("等待主控端推送下载任务…") + "\n"
+		if m.rcvFile != "" {
+			b += okStyle.Render(fmt.Sprintf("上次成功接收: %s", m.rcvFile)) + "\n"
+		}
 	}
 
 	b += m.errLine()
+	b += "\n" + m.viewLogs()
 	b += "\n" + hintStyle.Render("[s] 切换发送模式   [q] 退出")
 	return b
 }
@@ -410,6 +435,7 @@ func (m *Model) viewInput() string {
 	}
 	b += m.input.View() + "\n"
 	b += m.errLine()
+	b += "\n" + m.viewLogs()
 	b += "\n" + hintStyle.Render("[enter] 确认   [esc] 返回接收模式   [ctrl+c] 退出")
 	return b
 }
@@ -443,8 +469,20 @@ func (m *Model) viewServing() string {
 	}
 
 	b += m.errLine()
+	b += "\n" + m.viewLogs()
 	b += "\n" + hintStyle.Render("[r] 返回接收模式   [q] 退出")
 	return borderStyle.Render(b)
+}
+
+func (m *Model) viewLogs() string {
+	if len(m.logs) == 0 {
+		return ""
+	}
+	b := labelStyle.Render("--- 日志 (LOGS) ---") + "\n"
+	for _, l := range m.logs {
+		b += hintStyle.Render(l) + "\n"
+	}
+	return b
 }
 
 func (m *Model) errLine() string {

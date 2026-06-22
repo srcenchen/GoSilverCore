@@ -1,7 +1,6 @@
 package server
 
 import (
-	"errors"
 	"go-silver-core/internal/chunk"
 	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/queue"
@@ -65,8 +64,8 @@ func (s *Session) AddChunk(i int64, checksum uint32) {
 }
 
 // UpdatePeer 更新Peer信息：减少活跃连接数、更新速度、维护失败计数。
-// failed=true 时累加 failCount，会在调度得分中指数降权；成功时清零 failCount。
-func (s *Session) UpdatePeer(providerUuid string, speed int64, failed bool) {
+// status 可以是 "failed", "busy", "done"
+func (s *Session) UpdatePeer(providerUuid string, speed int64, status string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	peer, ok := s.Peers[providerUuid]
@@ -76,15 +75,16 @@ func (s *Session) UpdatePeer(providerUuid string, speed int64, failed bool) {
 	if peer.connNum > 0 {
 		peer.connNum--
 	}
-	if failed {
+	if status == "failed" {
 		peer.failCount++
-	} else {
+	} else if status == "done" {
 		// 成功一次清零失败计数，给节点重新赢得调度机会
 		peer.failCount = 0
 		if speed > 0 {
 			peer.maxSpeed = max(peer.maxSpeed, speed)
 		}
 	}
+	// "busy" 状态只减少 connNum，不增加也不清零 failCount
 }
 
 // IsMain 是否为主发送端
@@ -92,20 +92,4 @@ func (s *Session) IsMain() bool {
 	return s.isMain
 }
 
-// AcquireUploadSlot 申请一个并发上传槽，如果满了会阻塞以防止服务被拖垮
-func (s *Session) AcquireUploadSlot() error {
-	select {
-	case s.uploadSem <- struct{}{}:
-		return nil
-	case <-s.done:
-		return errors.New("session stopped")
-	}
-}
 
-// ReleaseUploadSlot 释放并发上传槽
-func (s *Session) ReleaseUploadSlot() {
-	select {
-	case <-s.uploadSem:
-	default:
-	}
-}

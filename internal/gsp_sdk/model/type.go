@@ -16,6 +16,7 @@ type GetChunkResp struct {
 	Index    int64  `json:"index"`    // 申请指定的片
 	Status   bool   `json:"status"`   // 申请的片的状态
 	CheckSum uint32 `json:"checkSum"` // 申请的片的哈希校验值
+	Msg      string `json:"msg,omitempty"` // 错误或状态附加信息，如 PeerBusy
 }
 
 type GetFileStatusResp struct {

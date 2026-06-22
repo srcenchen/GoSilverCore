@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"log"
@@ -30,9 +31,25 @@ func main() {
 
 	// 未显式提供任何参数 -> 进入 TUI 壳：默认接收模式，按 s 切换发送模式。
 	if flag.NFlag() == 0 {
-		p := tea.NewProgram(tui.New(), tea.WithAltScreen())
+		originalStdout := os.Stdout
+		r, w, _ := os.Pipe()
+		os.Stdout = w
+		os.Stderr = w
+		log.SetOutput(w)
+
+		go func() {
+			scanner := bufio.NewScanner(r)
+			for scanner.Scan() {
+				select {
+				case tui.GlobalLogCh <- scanner.Text():
+				default:
+				}
+			}
+		}()
+
+		p := tea.NewProgram(tui.New(), tea.WithAltScreen(), tea.WithOutput(originalStdout))
 		if _, err := p.Run(); err != nil {
-			log.Fatalf("TUI 运行失败: %v", err)
+			fmt.Fprintf(originalStdout, "TUI 运行失败: %v\n", err)
 		}
 		return
 	}

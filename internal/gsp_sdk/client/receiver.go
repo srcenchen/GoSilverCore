@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"time"
 )
 
 // GetFileStatus 获取文件状态请求
@@ -20,6 +21,7 @@ func (g *GspSdk) GetFileStatus() (r model.GetFileStatusResp, err error) {
 	if err != nil {
 		return
 	}
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
 	defer g.connPool.PutConn(g.srvAddr, conn)
 	req := model.BaseJson{Operate: "getFileStatus"}
 	reqJson, _ := json.Marshal(req)
@@ -39,10 +41,11 @@ func (g *GspSdk) GetFileStatus() (r model.GetFileStatusResp, err error) {
 // GetChunk 获取文件块
 func (g *GspSdk) GetChunk(addr string, i int64, ck *chunk.FileChunk) (r []byte, checksum uint32, err error) {
 	conn, err := g.connPool.GetConn(addr)
-	defer g.connPool.PutConn(addr, conn)
 	if err != nil {
 		return r, 0, err
 	}
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	defer g.connPool.PutConn(addr, conn)
 	reqG := model.GetChunkReq{Index: i, Operate: "getChunk"}
 	reqJson, _ := json.Marshal(reqG)
 	if err = g.codec.EncodeTo(conn, gsp.TypeJSON, reqJson); err != nil {
@@ -57,6 +60,12 @@ func (g *GspSdk) GetChunk(addr string, i int64, ck *chunk.FileChunk) (r []byte, 
 	var chunkInfo model.GetChunkResp
 	if err := json.Unmarshal(resp.Payload, &chunkInfo); err != nil {
 		return nil, 0, fmt.Errorf("解析块信息失败: %v", err)
+	}
+	if !chunkInfo.Status {
+		if chunkInfo.Msg != "" {
+			return nil, 0, errors.New(chunkInfo.Msg)
+		}
+		return nil, 0, errors.New("服务器拒绝提供此分块")
 	}
 	buf2 := g.memPool.Get(_const.ChunkSize)
 	defer g.memPool.Put(buf2)
@@ -78,10 +87,11 @@ func (g *GspSdk) GetChunk(addr string, i int64, ck *chunk.FileChunk) (r []byte, 
 // ReportChunk 告知服务端，我是uuid 我已经拥有 第 i 块
 func (g *GspSdk) ReportChunk(uuid string, i int64) error {
 	conn, err := g.connPool.GetConn(g.srvAddr)
-	defer g.connPool.PutConn(g.srvAddr, conn)
 	if err != nil {
 		return err
 	}
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	defer g.connPool.PutConn(g.srvAddr, conn)
 	reqG := model.ReportChunkReq{Index: i, Operate: "reportChunk", UUID: uuid}
 	reqJson, _ := json.Marshal(reqG)
 	if err = g.codec.EncodeTo(conn, gsp.TypeJSON, reqJson); err != nil {
@@ -94,10 +104,11 @@ func (g *GspSdk) ReportChunk(uuid string, i int64) error {
 // 服务端处理后将会返回一个地址
 func (g *GspSdk) WantChunk(i int64) (*model.WantChunkResp, error) {
 	conn, err := g.connPool.GetConn(g.srvAddr)
-	defer g.connPool.PutConn(g.srvAddr, conn)
 	if err != nil {
 		return nil, err
 	}
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	defer g.connPool.PutConn(g.srvAddr, conn)
 	reqG := model.WantChunkReq{Index: i, Operate: "wantChunk"}
 	reqJson, _ := json.Marshal(reqG)
 	if err = g.codec.EncodeTo(conn, gsp.TypeJSON, reqJson); err != nil {
@@ -125,7 +136,7 @@ func (g *GspSdk) WantChunk(i int64) (*model.WantChunkResp, error) {
 // 连接断开时 Tracker 自动清理此 Peer 的所有分块记录。
 func (g *GspSdk) PeerReg(peerPort int, uuid string) error {
 	// 直接拨号，不从连接池借，避免耗尽连接池供其他操作使用
-	controlConn, err := net.Dial("tcp", g.srvAddr)
+	controlConn, err := net.DialTimeout("tcp", g.srvAddr, 5*time.Second)
 	if err != nil {
 		return err
 	}
@@ -152,10 +163,11 @@ func (g *GspSdk) PeerReg(peerPort int, uuid string) error {
 // ReportPeer 向服务端发送Peer信息，包括提供下载的对端UUID和本次状态
 func (g *GspSdk) ReportPeer(uuid string, providerUuid string, speed int64, status string) error {
 	conn, err := g.connPool.GetConn(g.srvAddr)
-	defer g.connPool.PutConn(g.srvAddr, conn)
 	if err != nil {
 		return err
 	}
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	defer g.connPool.PutConn(g.srvAddr, conn)
 	reqG := model.PeerReportReq{
 		Operate:      "reportPeer",
 		UUID:         uuid,
