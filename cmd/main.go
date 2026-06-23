@@ -18,12 +18,16 @@ var (
 	mode       string
 	filePath   string
 	senderAddr string
+	seed       bool
+	zone       string
 )
 
 func init() {
 	flag.StringVar(&mode, "mode", "sender", "模式选择 receiver/sender（提供任一参数即进入非交互模式）")
 	flag.StringVar(&filePath, "file", "", "文件路径（sender 模式）")
 	flag.StringVar(&senderAddr, "senderAddr", "", "发送端地址，例如 192.168.1.10:48080（receiver 模式）")
+	flag.BoolVar(&seed, "seed", true, "下载完成后是否作为种子节点保持运行（receiver 模式）")
+	flag.StringVar(&zone, "zone", "", "机房标签，例如 A/B（同机房优先调度；留空则由中心按 IP 子网推断）")
 }
 
 func main() {
@@ -62,7 +66,7 @@ func main() {
 			os.Exit(2)
 		}
 		log.Println("接收模式")
-		receiver.Start(senderAddr)
+		receiver.Start(senderAddr, seed, zone)
 	case "sender":
 		if filePath == "" {
 			fmt.Println("sender 模式需要 -file")
@@ -70,8 +74,8 @@ func main() {
 		}
 		log.Println("发送模式")
 		sender.Start(filePath)
+		select {} // 发送模式保持运行
 	default:
 		log.Fatal("模式选择错误")
 	}
-	select {}
 }

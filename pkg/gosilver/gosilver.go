@@ -13,20 +13,29 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
+// BlockSource 描述一个正在进行中的分块下载：正在下载第 Index 块、数据源为 Addr。
+// 供 UI 标注「当前正在从哪个 peer 下载哪个块」。
+type BlockSource struct {
+	Index int64  // 块序号
+	Addr  string // 数据源地址 ip:port（中心源亦以其实际地址呈现）
+}
+
 // ProgressInfo 包含当前的下载进度状态
 type ProgressInfo struct {
-	TotalChunks int64   // 总分块数
-	Downloaded  int64   // 已下载的分块数
-	Percentage  float64 // 下载百分比 (0.0 到 100.0)
-	SpeedMbps   int64   // 当前下载速度 (Mbps)
-	Status      string  // 状态: "idle", "downloading", "completed", "failed", "cancelled"
-	Error       error   // 错误信息 (如果失败)
+	TotalChunks int64         // 总分块数
+	Downloaded  int64         // 已下载的分块数
+	Percentage  float64       // 下载百分比 (0.0 到 100.0)
+	SpeedMbps   int64         // 当前下载速度 (Mbps)
+	Status      string        // 状态: "idle", "downloading", "completed", "failed", "cancelled"
+	Active      []BlockSource // 当前正在下载中的块及其数据源（按块序号升序）
+	Error       error         // 错误信息 (如果失败)
 }
 
 // Server 用于管理文件分发主服务端 (Sender) 的启动和停止
@@ -52,24 +61,24 @@ func NewServer(addr string, filePath string) *Server {
 func (s *Server) Start() error {
 	s.mp = mempool.NewMemPool(_const.ChunkSize)
 	s.session = server.NewGspSession(s.addr, s.mp)
-	
+
 	if err := s.session.Start(); err != nil {
 		return err
 	}
-	
+
 	f, err := os.Open(s.filePath)
 	if err != nil {
 		s.session.Stop()
 		return err
 	}
 	s.file = f
-	
+
 	if err := s.session.BeSendMain(f); err != nil {
 		f.Close()
 		s.session.Stop()
 		return err
 	}
-	
+
 	return nil
 }
 
@@ -122,16 +131,48 @@ func (s *Server) Stop() {
 type Client struct {
 	senderAddr string
 	saveDir    string
+	Zone       string // 本节点机房标签（可空，空则由中心按 IP 推断），需在 StartDownload 前设置
 	peerPort   int
 	mp         *mempool.MemPool
 	session    *server.Session
 	file       *os.File
-	
+
 	mu         sync.Mutex
 	status     ProgressInfo
+	active     map[int64]string // 进行中的块 -> 数据源地址（受 mu 保护）
 	progressCh chan ProgressInfo
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
+}
+
+// activeSnapshotLocked 返回当前进行中下载的有序快照。调用方必须持有 c.mu。
+func (c *Client) activeSnapshotLocked() []BlockSource {
+	if len(c.active) == 0 {
+		return nil
+	}
+	out := make([]BlockSource, 0, len(c.active))
+	for idx, addr := range c.active {
+		out = append(out, BlockSource{Index: idx, Addr: addr})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Index < out[j].Index })
+	return out
+}
+
+// setActive 登记/更新「正在从 addr 下载第 i 块」，并推送一次进度供 UI 实时刷新。
+func (c *Client) setActive(i int64, addr string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.active[i] = addr
+	c.status.Active = c.activeSnapshotLocked()
+	c.updateProgress(c.status)
+}
+
+// clearActive 移除一条进行中的下载（块完成或失败时调用）。
+func (c *Client) clearActive(i int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.active, i)
+	c.status.Active = c.activeSnapshotLocked()
 }
 
 // NewClient 创建一个新的客户端实例
@@ -159,13 +200,13 @@ func (c *Client) StartDownload() (<-chan ProgressInfo, error) {
 	c.status = ProgressInfo{
 		Status: "downloading",
 	}
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
-	
+
 	c.wg.Add(1)
 	go c.runDownload(ctx)
-	
+
 	return c.progressCh, nil
 }
 
@@ -220,9 +261,13 @@ func (c *Client) finishCancelled() {
 
 func (c *Client) runDownload(ctx context.Context) {
 	defer c.wg.Done()
-	
+
+	c.mu.Lock()
+	c.active = make(map[int64]string)
+	c.mu.Unlock()
+
 	c.mp = mempool.NewMemPool(_const.ChunkSize)
-	
+
 	// 随机分配子节点端口
 	c.peerPort = rand.IntN(999) + 3000
 	c.session = server.NewGspSession(":"+strconv.Itoa(c.peerPort), c.mp)
@@ -232,7 +277,7 @@ func (c *Client) runDownload(ctx context.Context) {
 	}
 	defer c.session.Stop()
 
-	gspC := client.NewGspSdk(c.senderAddr, c.mp)
+	gspC := client.NewGspSdk(c.senderAddr, c.mp, c.session.UUID, c.Zone)
 	var status model.GetFileStatusResp
 	for {
 		var err error
@@ -296,9 +341,36 @@ func (c *Client) runDownload(ctx context.Context) {
 	c.session.BeSendSub(f)
 	ck := c.session.GetChunk()
 
+	// 控制面处理器：响应中心的统一指挥（prefetch 补种 / backoff 降并发）。
+	onControl := func(msg model.ControlMsg) {
+		switch msg.Cmd {
+		case "prefetch":
+			if c.session.HasLocalChunk(msg.Index) {
+				return
+			}
+			re, err := gspC.WantChunk(msg.Index, _const.SchedMaxSourcesPerWant)
+			if err != nil {
+				return
+			}
+			if cm, _, _, ok := gspC.FetchChunk(msg.Index, &ck, re.Sources, c.senderAddr, nil); ok {
+				c.session.AddChunk(msg.Index, cm)
+				_ = gspC.ReportChunk(c.session.UUID, msg.Index)
+				log.Printf("[gosilver] 已按中心指令预取块 %d 补种", msg.Index)
+			}
+		case "backoff":
+			c.session.SetUploadMax(_const.UploadConcurrencyHDD)
+			go func(until int64) {
+				if d := time.Until(time.Unix(until, 0)); d > 0 {
+					time.Sleep(d)
+				}
+				c.session.SetUploadMax(_const.UploadConcurrencyDefault)
+			}(msg.Until)
+		}
+	}
+
 	// 注册 Peer
 	for {
-		err := gspC.PeerReg(c.peerPort, c.session.UUID)
+		err := gspC.PeerReg(c.peerPort, c.session.UUID, onControl)
 		if err == nil {
 			break
 		}
@@ -326,6 +398,17 @@ func (c *Client) runDownload(ctx context.Context) {
 	//
 	// 每个客户端的下载序列是：[offset, offset+1, ..., ChunkNum-1, 0, 1, ..., offset-1]
 	// 这是一个循环偏移，保证所有块都会被下载。
+	// 空文件（ChunkNum==0）：无需下载，直接标记完成，避免对 0 取模 panic。
+	if status.ChunkNum <= 0 {
+		c.mu.Lock()
+		c.status.Status = "completed"
+		c.status.Percentage = 100.0
+		c.status.SpeedMbps = 0
+		c.updateProgress(c.status)
+		c.mu.Unlock()
+		return
+	}
+
 	h := fnv.New32a()
 	h.Write([]byte(c.session.UUID))
 	offset := int64(h.Sum32()) % int64(status.ChunkNum)
@@ -350,11 +433,11 @@ func (c *Client) runDownload(ctx context.Context) {
 		var wg sync.WaitGroup
 		limit := make(chan struct{}, 5) // 控制并发数
 
+	OuterLoop:
 		for _, idx := range indices {
 			select {
 			case <-ctx.Done():
-				c.finishCancelled()
-				return
+				break OuterLoop
 			default:
 			}
 
@@ -371,8 +454,8 @@ func (c *Client) runDownload(ctx context.Context) {
 				default:
 				}
 
-				// 询问 Tracker 分块位置
-				reChunk, err := gspC.WantChunk(i)
+				// 询问调度中心，拿到按吞吐排序的候选源列表
+				reChunk, err := gspC.WantChunk(i, _const.SchedMaxSourcesPerWant)
 				if err != nil {
 					mu.Lock()
 					failedList = append(failedList, i)
@@ -380,32 +463,21 @@ func (c *Client) runDownload(ctx context.Context) {
 					return
 				}
 
-				targetAddr := reChunk.Addr
-				if targetAddr == "" {
-					targetAddr = c.senderAddr
-				}
-
-				// 开始下载
-				tBegin := time.Now()
-				_, cm, err := gspC.GetChunk(targetAddr, i, &ck)
-				if err != nil {
-					// 上报失败，以扣减提供端的并发连接数
-					_ = gspC.ReportPeer(c.session.UUID, reChunk.UUID, 0, "failed")
+				// 按候选列表本地故障转移（内部完成 ReportPeer 上报）。
+				// onAttempt 实时记录「正在从哪个 peer 下载本块」供 TUI 标注；故障转移时会更新为次选源。
+				cm, speedMbps, _, ok := gspC.FetchChunk(i, &ck, reChunk.Sources, c.senderAddr, func(addr string) {
+					c.setActive(i, addr)
+				})
+				c.clearActive(i)
+				if !ok {
 					mu.Lock()
 					failedList = append(failedList, i)
 					mu.Unlock()
 					return
-				}
-
-				duration := time.Since(tBegin).Microseconds()
-				var speedMbps int64 = 0
-				if duration > 0 {
-					speedMbps = (_const.ChunkSize / duration) * 8
 				}
 
 				c.session.AddChunk(i, cm)
 				_ = gspC.ReportChunk(c.session.UUID, i)
-				_ = gspC.ReportPeer(c.session.UUID, reChunk.UUID, speedMbps, "done")
 
 				c.mu.Lock()
 				downloadedCount++
@@ -460,7 +532,7 @@ func resolveSavePath(saveDir, rawName string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, sanitizeFileName(rawName)), nil
+	return filepath.Join(dir, SanitizeFileName(rawName)), nil
 }
 
 // defaultSaveDir 返回一个可定位的默认保存目录：可执行文件同级的 GoSilverDownloads。
@@ -472,9 +544,10 @@ func defaultSaveDir() string {
 	return "GoSilverDownloads"
 }
 
-// sanitizeFileName 清洗远端传来的文件名：剥离路径成分、替换各平台非法字符、
+// SanitizeFileName 清洗远端传来的文件名：剥离路径成分、替换各平台非法字符、
 // 处理 Windows 结尾点/空格与保留设备名，保证在 Windows/macOS/Linux 上都能安全创建文件。
-func sanitizeFileName(name string) string {
+// 导出以便其他接收路径（如 internal/receiver）复用同一套防路径穿越逻辑，避免行为不一致。
+func SanitizeFileName(name string) string {
 	// 替换 Windows 非法字符 \ / : * ? " < > | 与控制字符；同时消除路径分隔符以防目录穿越
 	name = strings.Map(func(r rune) rune {
 		switch r {

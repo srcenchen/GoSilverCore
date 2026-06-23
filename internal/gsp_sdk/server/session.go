@@ -4,21 +4,120 @@ import (
 	"errors"
 	"fmt"
 	"go-silver-core/internal/chunk"
+	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/gsp"
 	"go-silver-core/pkg/mempool"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 )
 
+// zoneOfCentral 是中心服务端自身的机房标签，对所有机房可达（但出口稀缺）。
+const zoneOfCentral = "*"
+
+// zoneOf 计算一个节点的机房标签：显式标签优先，否则按 IP /24 前缀推断。
+func zoneOf(ipPort, explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	host := ipPort
+	if h, _, err := net.SplitHostPort(ipPort); err == nil {
+		host = h
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		// 默认 /24：前三段相同即同机房
+		return fmt.Sprintf("%d.%d.%d.0/%d", v4[0], v4[1], v4[2], _const.SchedDefaultZonePrefixBits)
+	}
+	v6 := ip.To16()
+	return fmt.Sprintf("%x:%x:%x::/48", v6[0:2], v6[2:4], v6[4:6])
+}
+
 type Peer struct {
-	connAddr  string // 连接地址
-	connNum   int    // 当前活跃连接数（调度时递增，完成/失败后递减）
-	maxSpeed  int64  // 历史最大速度 Mbps
-	failCount int    // 连续失败次数；成功后清零，用于调度降权
+	connAddr string // 连接地址 ip:port
+	zone     string // 所在机房标签（显式上报或按 IP 推断）
+
+	// upMbpsEWMA 是该源有效服务速率的 EWMA 实测值（Mbps）。
+	// 它天然等于 min(网络上行, 磁盘读)：HDD 节点会自然收敛到较低值。
+	// 0 表示尚无实测样本，调度时按冷启动乐观默认值处理。
+	upMbpsEWMA float64
+
+	// failScore 是带时间衰减的连续失败分（Rel = 0.5^failScore）。
+	// 失败时先衰减再 +1，成功时清零；配合 lastFailUnix 实现「好节点能从瞬时抖动恢复」。
+	failScore   float64
+	lastFailSec int64
+
+	// leaseExpiry 保存当前所有未完成调度租约的到期时间（Unix 纳秒）。
+	// connNum = 有效（未过期）租约数。租约带 TTL，死客户端不会永久占用名额。
+	leaseExpiry []int64
+
+	// controlConn 是该 peer 的 PeerReg 长连接，中心经此主动下发控制指令（统一指挥）。
+	controlConn net.Conn
+}
+
+// pruneLeases 移除已过期的租约。调用方必须持有 Session 锁。
+func (p *Peer) pruneLeases(nowNano int64) {
+	if len(p.leaseExpiry) == 0 {
+		return
+	}
+	kept := p.leaseExpiry[:0]
+	for _, exp := range p.leaseExpiry {
+		if exp > nowNano {
+			kept = append(kept, exp)
+		}
+	}
+	p.leaseExpiry = kept
+}
+
+// connNum 返回当前有效租约数（需先 pruneLeases）。
+func (p *Peer) connNum() int { return len(p.leaseExpiry) }
+
+// addLease 记一个带 TTL 的租约。调用方必须持有 Session 锁。
+func (p *Peer) addLease(nowNano, ttlNano int64) {
+	p.leaseExpiry = append(p.leaseExpiry, nowNano+ttlNano)
+}
+
+// releaseLease 释放一个租约（完成/失败时调用），优先释放最早到期的一个。
+func (p *Peer) releaseLease() {
+	if len(p.leaseExpiry) == 0 {
+		return
+	}
+	minIdx := 0
+	for i, exp := range p.leaseExpiry {
+		if exp < p.leaseExpiry[minIdx] {
+			minIdx = i
+		}
+	}
+	p.leaseExpiry = append(p.leaseExpiry[:minIdx], p.leaseExpiry[minIdx+1:]...)
+}
+
+// effFail 返回按时间衰减后的失败分。调用方需提供当前 Unix 秒。
+func (p *Peer) effFail(nowSec int64) float64 {
+	if p.failScore <= 0 {
+		return 0
+	}
+	elapsed := float64(nowSec - p.lastFailSec)
+	if elapsed <= 0 {
+		return p.failScore
+	}
+	return p.failScore * math.Pow(0.5, elapsed/_const.SchedFailHalfLifeSec)
+}
+
+// effUp 返回有效上行估计（Mbps），无实测样本时取冷启动乐观默认值。
+func (p *Peer) effUp() float64 {
+	if p.upMbpsEWMA <= 0 {
+		return _const.SchedColdStartMbps
+	}
+	return p.upMbpsEWMA
 }
 
 // Session 这里是发送端的Session
@@ -37,12 +136,16 @@ type Session struct {
 	queue         *queue2
 	isMain        bool                          // 是否为主发送端
 	done          chan struct{}                 // 关闭通道
-	uploadSem     chan struct{}                 // 并发上传限制 (限流信号量)
+
+	// 上传并发限流（动态可调，支持控制面 backoff 指令收缩）。
+	// 用 atomic 计数 + 动态上限，而非固定容量 channel，便于运行时调整 max。
+	uploadCur atomic.Int64
+	uploadMax atomic.Int64
 }
 
 func NewGspSession(addr string, mempool *mempool.MemPool) *Session {
 	uuidV7, _ := uuid.NewV7()
-	return &Session{
+	s := &Session{
 		addr:        addr,
 		UUID:        uuidV7.String(),
 		chunkHash:   map[int64]uint32{},
@@ -51,8 +154,44 @@ func NewGspSession(addr string, mempool *mempool.MemPool) *Session {
 		PeerOwners:  make(map[string]map[int64]struct{}),
 		memPool:     mempool,
 		done:        make(chan struct{}),
-		uploadSem:   make(chan struct{}, 5), // 限制最大 5 个并发上传
 	}
+	s.uploadMax.Store(_const.UploadConcurrencyDefault)
+	s.queue = &queue2{s: s}
+	return s
+}
+
+// AcquireUpload 尝试占用一个上传名额，最多等待 timeout。占用成功返回 true。
+// 用于 handle.GetChunk 限制本节点并发上传，保护 HDD 源不被并发随机读拖垮。
+func (s *Session) AcquireUpload(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		cur := s.uploadCur.Load()
+		if cur < s.uploadMax.Load() {
+			if s.uploadCur.CompareAndSwap(cur, cur+1) {
+				return true
+			}
+			continue // CAS 失败，重试
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// ReleaseUpload 释放一个上传名额。
+func (s *Session) ReleaseUpload() {
+	if s.uploadCur.Load() > 0 {
+		s.uploadCur.Add(-1)
+	}
+}
+
+// SetUploadMax 动态调整最大并发上传数（控制面 backoff / 恢复时调用）。
+func (s *Session) SetUploadMax(n int64) {
+	if n < 1 {
+		n = 1
+	}
+	s.uploadMax.Store(n)
 }
 
 // Start 建立服务端监听
@@ -99,19 +238,15 @@ func (s *Session) Stop() {
 // BeSendMain 作为发送主机
 func (s *Session) BeSendMain(f *os.File) error {
 	ck := chunk.NewFileChunk(f, s.memPool)
-	nums := ck.GetChunkNum()
 	s.chunkProvider = *ck
 	s.isMain = true
-	// 把自己也作为一个 Peer
+	// 把自己也作为一个 Peer：zone="*" 对所有机房可达，作为每机房播种与最终兜底。
 	s.Peers[s.UUID] = &Peer{
 		connAddr: "",
+		zone:     zoneOfCentral,
 	}
-	for i := int64(0); i < nums; i++ {
-		if s.ChunkOwners[i] == nil {
-			s.ChunkOwners[i] = make(map[string]struct{})
-		}
-		s.ChunkOwners[i][s.UUID] = struct{}{}
-	}
+	// 启动中心协调器：周期性向各机房补种缺块、对过载慢源下发 backoff。
+	s.StartCoordinator()
 	return nil
 }
 

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"time"
 )
 
 // sender 发送方处理接收到的数据，进行对应的操作
@@ -25,9 +26,12 @@ type ToolSession interface {
 	GetQueue() queue.DownloadQueue
 	AddBlockOwner(i int64, uuid string)
 	RemovePeer(addr string)
-	AddPeer(uuid string, addr string)
+	AddPeer(uuid string, addr string, zone string)
 	UpdatePeer(providerUuid string, speed int64, status string)
 	IsMain() bool
+	AcquireUpload(timeout time.Duration) bool
+	ReleaseUpload()
+	SetControlConn(uuid string, conn net.Conn)
 }
 
 // GetFileStatus 获取文件信息
@@ -52,7 +56,7 @@ func WantChunk(conn net.Conn, data []byte, tool ToolSession) {
 		return
 	}
 	q := tool.GetQueue()
-	q.Want(wc.Index, conn)
+	q.Want(wc, conn)
 }
 
 // ReportChunk 接收端上报自己拥有了这个块
@@ -85,6 +89,17 @@ func GetChunk(conn net.Conn, data []byte, tool ToolSession) {
 		tool.CloseConn(conn)
 		return
 	}
+
+	// 上传并发限流：抢一个名额（短等待）。抢不到说明本节点正忙，
+	// 回 PeerBusy 让客户端转向次选源，避免把 HDD/慢源拉爆。
+	if !tool.AcquireUpload(2 * time.Second) {
+		resp, _ := json.Marshal(model.GetChunkResp{Index: gc.Index, Status: false, Msg: "PeerBusy"})
+		codec := gsp.Codec{}
+		codec.EncodeTo(conn, gsp.TypeJSON, resp)
+		tool.CloseConn(conn)
+		return
+	}
+	defer tool.ReleaseUpload()
 
 	// 发送回应，表示可以提供分块
 	resp, _ := json.Marshal(model.GetChunkResp{Index: gc.Index, Status: true, CheckSum: checkSum})
@@ -120,14 +135,19 @@ func PeerReg(conn net.Conn, data []byte, tool ToolSession) {
 		return
 	}
 	slog.Info("对端注册")
-	tool.AddPeer(wc.UUID, strings.Split(conn.RemoteAddr().String(), ":")[0]+":"+wc.Port)
+	tool.AddPeer(wc.UUID, strings.Split(conn.RemoteAddr().String(), ":")[0]+":"+wc.Port, wc.Zone)
+	// 记录控制长连接，中心据此主动下发指令（prefetch/backoff）。
+	tool.SetControlConn(wc.UUID, conn)
+
+	// 持续读以检测对端下线。用小缓冲（不再借用 4MB 内存池，修复内存池被长连接钉死的隐患）。
 	codec := gsp.Codec{}
-	buf := tool.GetMemPool().Get(1)
-	defer tool.GetMemPool().Put(buf)
-	_, err = codec.Decode(conn, *buf)
-	if err != nil {
-		tool.RemovePeer(wc.UUID)
-		slog.Info("对端下线，尝试清理:" + strings.Split(conn.RemoteAddr().String(), ":")[0] + ":" + wc.Port)
+	buf := make([]byte, 256)
+	for {
+		if _, err = codec.Decode(conn, buf); err != nil {
+			tool.RemovePeer(wc.UUID)
+			slog.Info("对端下线，尝试清理:" + strings.Split(conn.RemoteAddr().String(), ":")[0] + ":" + wc.Port)
+			return
+		}
 	}
 }
 

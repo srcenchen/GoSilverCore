@@ -21,8 +21,8 @@ func TestSanitizeFileName(t *testing.T) {
 		"../../etc/passwd": ".._.._etc_passwd",
 	}
 	for in, want := range cases {
-		if got := sanitizeFileName(in); got != want {
-			t.Errorf("sanitizeFileName(%q) = %q, want %q", in, got, want)
+		if got := SanitizeFileName(in); got != want {
+			t.Errorf("SanitizeFileName(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

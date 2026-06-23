@@ -37,6 +37,6 @@ func NewFileChunk(f *os.File, pool *mempool.MemPool) *FileChunk {
 		file:      f,
 		chunkSize: chunkSize,
 		memPool:   pool,
-		ioPermit:  make(chan struct{}, 1),
+		ioPermit:  make(chan struct{}, _const.DiskIOConcurrency),
 	}
 }

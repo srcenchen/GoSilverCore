@@ -41,10 +41,10 @@ const senderGSPPort = 48080
 type mode int
 
 const (
-	modeReceive mode = iota // 默认：接收/监听
-	modeSendInputFile       // 发送：输入文件路径
-	modeSendInputDir        // 发送：输入接收端保存目录（可空）
-	modeSendServing         // 发送：正在广播并分发
+	modeReceive       mode = iota // 默认：接收/监听
+	modeSendInputFile             // 发送：输入文件路径
+	modeSendInputDir              // 发送：输入接收端保存目录（可空）
+	modeSendServing               // 发送：正在广播并分发
 )
 
 // ---- 消息类型 ----
@@ -75,14 +75,14 @@ type Model struct {
 	width int
 
 	// 接收端状态
-	listenStop chan struct{}              // 关闭以停止多播监听
-	announceCh chan announceMsg           // 监听协程 -> Update
-	client     *gosilver.Client           // 当前下载客户端
+	listenStop chan struct{}    // 关闭以停止多播监听
+	announceCh chan announceMsg // 监听协程 -> Update
+	client     *gosilver.Client // 当前下载客户端
 	progressCh <-chan gosilver.ProgressInfo
-	rcvFile    string                     // 当前正在下载的文件名
-	rcvSender  string                     // 数据源地址
-	rcvInfo    gosilver.ProgressInfo      // 最近一次进度
-	lastToken  string                     // 已处理过的通告 token，用于去重
+	rcvFile    string                // 当前正在下载的文件名
+	rcvSender  string                // 数据源地址
+	rcvInfo    gosilver.ProgressInfo // 最近一次进度
+	lastToken  string                // 已处理过的通告 token，用于去重
 
 	// 发送端状态
 	input        textinput.Model
@@ -408,6 +408,13 @@ func (m *Model) viewReceive() string {
 		b += fmt.Sprintf("%s  %d/%d 块  %d Mbps  [%s]\n",
 			fmt.Sprintf("%.1f%%", m.rcvInfo.Percentage),
 			m.rcvInfo.Downloaded, m.rcvInfo.TotalChunks, m.rcvInfo.SpeedMbps, m.rcvInfo.Status)
+		// 标注当前正在从哪个 peer 下载哪个块
+		if len(m.rcvInfo.Active) > 0 {
+			b += "\n" + labelStyle.Render("活跃下载:") + "\n"
+			for _, a := range m.rcvInfo.Active {
+				b += fmt.Sprintf("  块 #%-6d ← %s\n", a.Index, m.peerLabel(a.Addr))
+			}
+		}
 		if m.rcvInfo.Status == "completed" {
 			b += okStyle.Render("🎉 下载完成") + "\n"
 		}
@@ -490,6 +497,17 @@ func (m *Model) errLine() string {
 		return "\n" + errStyle.Render("⚠ "+m.err.Error()) + "\n"
 	}
 	return ""
+}
+
+// peerLabel 渲染数据源地址：与主控端地址一致时标注「主控端」，否则视为 P2P 对端。
+func (m *Model) peerLabel(addr string) string {
+	if addr == "" {
+		return "主控端"
+	}
+	if addr == m.rcvSender {
+		return "主控端 " + addr
+	}
+	return "对端 " + addr
 }
 
 func dirOrDefault(d string) string {

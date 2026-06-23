@@ -1,11 +1,12 @@
 package server
 
-// AddPeer 对端注册
-func (s *Session) AddPeer(uuid string, addr string) {
+// AddPeer 对端注册。zone 为显式机房标签，空则按 addr 的 IP 推断。
+func (s *Session) AddPeer(uuid string, addr string, zone string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Peers[uuid] = &Peer{
 		connAddr: addr,
+		zone:     zoneOf(addr, zone),
 	}
 }
 
@@ -48,7 +49,7 @@ func (s *Session) Snapshot() []PeerSnapshot {
 			Addr:     p.connAddr,
 			Owned:    int64(len(s.PeerOwners[uid])),
 			Total:    total,
-			MaxSpeed: p.maxSpeed,
+			MaxSpeed: int64(p.upMbpsEWMA),
 		})
 	}
 	return out

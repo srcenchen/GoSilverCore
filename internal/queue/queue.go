@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"go-silver-core/internal/gsp_sdk/model"
 	"net"
 )
 
@@ -8,6 +9,7 @@ import (
 // 实现见 internal/gsp_sdk/server/queue.go 的 queue2。
 type DownloadQueue interface {
 	// Want 当有接收端申请某个块时被调用。
-	// 第一个参数是块序号（从 0 开始），第二个是接收端连接实体。
-	Want(i int64, conn net.Conn)
+	// req 携带块序号、请求方机房/UUID 与期望候选数；conn 是接收端连接，
+	// 调度结果（候选源列表）通过该连接写回。
+	Want(req model.WantChunkReq, conn net.Conn)
 }
