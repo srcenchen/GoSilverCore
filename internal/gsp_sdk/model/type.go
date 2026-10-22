@@ -49,8 +49,9 @@ type PeerRegReq struct {
 }
 
 type PeerReportReq struct {
-	Operate string `json:"operate"`
-	UUID    string `json:"uuid"`
-	Status  string `json:"status"`
-	Speed   int64  `json:"speed"`
+	Operate      string `json:"operate"`
+	UUID         string `json:"uuid"`
+	ProviderUUID string `json:"providerUuid"`
+	Status       string `json:"status"`
+	Speed        int64  `json:"speed"`
 }

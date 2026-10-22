@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"go-silver-core/internal/chunk"
 	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/queue"
@@ -39,7 +40,11 @@ func (s *Session) IndexValid(i int64) (bool, uint32) {
 	if v, ok := s.chunkHash[i]; ok {
 		return true, v
 	}
-	if i < 0 || i >= int64(len(s.ChunkOwners)) {
+	if i < 0 || i >= s.chunkProvider.GetChunkNum() {
+		return false, 0
+	}
+	if !s.isMain {
+		// 接收端/子发送端只能分发缓存(chunkHash)中已下载完的块，避免把全零文件块发送出去
 		return false, 0
 	}
 	buf := s.memPool.Get(_const.ChunkSize)
@@ -59,10 +64,39 @@ func (s *Session) AddChunk(i int64, checksum uint32) {
 	}
 }
 
-// UpdatePeer 更新Peer信息
-func (s *Session) UpdatePeer(uuid string, speed int64) {
+// UpdatePeer 更新Peer信息，减少其并发连接数并更新最大速度
+func (s *Session) UpdatePeer(providerUuid string, speed int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.Peers[uuid].connNum--
-	s.Peers[uuid].maxSpeed = max(s.Peers[uuid].maxSpeed, speed)
+	if peer, ok := s.Peers[providerUuid]; ok && peer != nil {
+		if peer.connNum > 0 {
+			peer.connNum--
+		}
+		if speed > 0 {
+			peer.maxSpeed = max(peer.maxSpeed, speed)
+		}
+	}
+}
+
+// IsMain 是否为主发送端
+func (s *Session) IsMain() bool {
+	return s.isMain
+}
+
+// AcquireUploadSlot 申请一个并发上传槽，如果满了会阻塞以防止服务被拖垮
+func (s *Session) AcquireUploadSlot() error {
+	select {
+	case s.uploadSem <- struct{}{}:
+		return nil
+	case <-s.done:
+		return errors.New("session stopped")
+	}
+}
+
+// ReleaseUploadSlot 释放并发上传槽
+func (s *Session) ReleaseUploadSlot() {
+	select {
+	case <-s.uploadSem:
+	default:
+	}
 }

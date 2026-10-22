@@ -18,6 +18,7 @@ func (g *GspSdk) GetFileStatus() (r model.GetFileStatusResp, err error) {
 	if err != nil {
 		return
 	}
+	defer g.connPool.PutConn(g.srvAddr, conn)
 	req := model.BaseJson{Operate: "getFileStatus"}
 	reqJson, _ := json.Marshal(req)
 	if err = g.codec.EncodeTo(conn, gsp.TypeJSON, reqJson); err != nil {
@@ -140,18 +141,19 @@ func (g *GspSdk) PeerReg(peerPort int, uuid string) error {
 	return nil
 }
 
-// ReportPeer 向服务端发送Peer信息
-func (g *GspSdk) ReportPeer(uuid string, speed int64) error {
+// ReportPeer 向服务端发送Peer信息，包括提供下载的对端UUID和本次状态
+func (g *GspSdk) ReportPeer(uuid string, providerUuid string, speed int64, status string) error {
 	conn, err := g.connPool.GetConn(g.srvAddr)
 	defer g.connPool.PutConn(g.srvAddr, conn)
 	if err != nil {
 		return err
 	}
 	reqG := model.PeerReportReq{
-		Operate: "reportPeer",
-		UUID:    uuid,
-		Status:  "done",
-		Speed:   speed,
+		Operate:      "reportPeer",
+		UUID:         uuid,
+		ProviderUUID: providerUuid,
+		Status:       status,
+		Speed:        speed,
 	}
 	reqJson, _ := json.Marshal(reqG)
 	if err = g.codec.EncodeTo(conn, gsp.TypeJSON, reqJson); err != nil {
