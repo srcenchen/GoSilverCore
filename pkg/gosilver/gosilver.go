@@ -9,11 +9,11 @@ import (
 	"go-silver-core/internal/receiver"
 	"go-silver-core/pkg/mempool"
 	"os"
-	"path/filepath"
 	"sync"
 )
 
 type ProgressInfo struct {
+	Active      []BlockSource
 	TotalChunks int64
 	Downloaded  int64
 	Percentage  float64
@@ -21,6 +21,38 @@ type ProgressInfo struct {
 	Status      string
 	Error       error
 }
+
+type BlockSource = receiver.BlockSource
+
+type PeerProgress struct {
+	UUID       string
+	Addr       string
+	Owned      int64
+	Total      int64
+	Percentage float64
+	MaxSpeed   int64
+}
+
+func (s *Server) Snapshot() []PeerProgress {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.session == nil {
+		return nil
+	}
+	var out []PeerProgress
+	for _, p := range s.session.Snapshot() {
+		if p.Self {
+			continue
+		}
+		pct := 0.0
+		if p.Total > 0 {
+			pct = float64(p.Chunks) * 100 / float64(p.Total)
+		}
+		out = append(out, PeerProgress{UUID: p.UUID, Addr: p.Addr, Owned: int64(p.Chunks), Total: int64(p.Total), Percentage: pct, MaxSpeed: int64(p.Speed)})
+	}
+	return out
+}
+
 type Server struct {
 	mu             sync.Mutex
 	addr, filePath string
@@ -73,6 +105,7 @@ func (s *Server) Stop() {
 }
 
 type Client struct {
+	Zone                string
 	lifecycle           sync.Mutex
 	mu                  sync.Mutex
 	senderAddr, saveDir string
@@ -80,6 +113,7 @@ type Client struct {
 	progressCh          chan ProgressInfo
 	cancel              context.CancelFunc
 	wg                  sync.WaitGroup
+	watchWG             sync.WaitGroup
 	session             *server.Session
 	sdk                 *client.GspSdk
 }
@@ -115,6 +149,7 @@ func (c *Client) CancelDownload() {
 	if c.sdk != nil {
 		c.sdk.Close()
 	}
+	c.watchWG.Wait()
 	if c.session != nil {
 		c.session.Stop()
 	}
@@ -162,7 +197,7 @@ func (c *Client) download(ctx context.Context) error {
 	if err := s.Start(); err != nil {
 		return err
 	}
-	sdk := client.NewGspSdk(c.senderAddr, pool).WithContext(ctx)
+	sdk := client.NewGspSdk(c.senderAddr, pool, s.UUID, c.Zone).WithContext(ctx)
 	c.sdk = &sdk
 	meta, err := sdk.GetFileStatus()
 	if err != nil {
@@ -171,14 +206,13 @@ func (c *Client) download(ctx context.Context) error {
 	if err = sdk.PeerReg(s.Port(), s.UUID); err != nil {
 		return err
 	}
-	dir := c.saveDir
-	if dir == "" {
-		dir = "."
-	}
-	if err = os.MkdirAll(dir, 0755); err != nil {
+	c.watchWG.Add(1)
+	go func() { defer c.watchWG.Done(); sdk.WatchControl(nil, s.ApplyControl, nil) }()
+	savePath, err := resolveSavePath(c.saveDir, meta.FileName)
+	if err != nil {
 		return err
 	}
-	return receiver.RunTo(ctx, c.senderAddr, filepath.Join(dir, filepath.Base(meta.FileName)), s, sdk, meta, func(p receiver.Progress) {
+	return receiver.RunTo(ctx, c.senderAddr, savePath, s, sdk, meta, func(p receiver.Progress) {
 		state := "downloading"
 		if p.Finished {
 			state = "completed"
@@ -187,6 +221,6 @@ func (c *Client) download(ctx context.Context) error {
 		if p.Total > 0 {
 			percent = float64(p.Done) * 100 / float64(p.Total)
 		}
-		c.emit(ProgressInfo{TotalChunks: p.Total, Downloaded: p.Done, Percentage: percent, SpeedMbps: p.Speed, Status: state})
+		c.emit(ProgressInfo{TotalChunks: p.Total, Downloaded: p.Done, Percentage: percent, SpeedMbps: p.Speed, Status: state, Active: p.Active})
 	})
 }

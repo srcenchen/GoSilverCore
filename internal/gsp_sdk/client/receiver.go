@@ -145,12 +145,16 @@ func (g *GspSdk) fetch(addr string, i int64, ck *chunk.FileChunk, copyTo *[]byte
 func (g *GspSdk) ReportChunk(id string, i int64) error {
 	return g.exchange(g.srvAddr, model.ReportChunkReq{Operate: "reportChunk", UUID: id, Index: i}, nil)
 }
-func (g *GspSdk) WantChunk(i int64) (*model.WantChunkResp, error) {
+func (g *GspSdk) WantChunk(i int64, want ...int) (*model.WantChunkResp, error) {
 	var out model.WantChunkResp
 	g.control.mu.Lock()
 	id := g.control.peerID
 	g.control.mu.Unlock()
-	err := g.exchange(g.srvAddr, model.WantChunkReq{Operate: "wantChunk", Index: i, UUID: id}, &out)
+	n := _const.SchedMaxSourcesPerWant
+	if len(want) > 0 {
+		n = want[0]
+	}
+	err := g.exchange(g.srvAddr, model.WantChunkReq{Operate: "wantChunk", Index: i, UUID: id, Zone: g.zone, Want: n}, &out)
 	if err == nil && out.Index != i {
 		err = errors.New("tracker returned a different index")
 	}
@@ -164,7 +168,7 @@ func (g *GspSdk) PeerReg(port int, id string) error {
 	stopCancel := context.AfterFunc(g.ctx, func() { _ = conn.Close() })
 	defer stopCancel()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	payload, _ := json.Marshal(model.PeerRegReq{Operate: "peerReg", Port: strconv.Itoa(port), UUID: id})
+	payload, _ := json.Marshal(model.PeerRegReq{Operate: "peerReg", Port: strconv.Itoa(port), UUID: id, Zone: g.zone})
 	if err = g.codec.EncodeTo(conn, gsp.TypeJSON, payload); err != nil {
 		conn.Close()
 		return err
@@ -192,6 +196,9 @@ func (g *GspSdk) PeerReg(port int, id string) error {
 	return nil
 }
 func (g *GspSdk) Watch(onPush func(model.PushStart), onDown func()) {
+	g.WatchControl(onPush, nil, onDown)
+}
+func (g *GspSdk) WatchControl(onPush func(model.PushStart), onControl func(model.ControlMsg), onDown func()) {
 	g.control.mu.Lock()
 	conn := g.control.conn
 	g.control.mu.Unlock()
@@ -215,6 +222,12 @@ func (g *GspSdk) Watch(onPush func(model.PushStart), onDown func()) {
 		var push model.PushStart
 		if packet.Type == gsp.TypeJSON && json.Unmarshal(packet.Payload, &push) == nil && push.Operate == "pushStart" && onPush != nil {
 			onPush(push)
+		}
+		if packet.Type == gsp.TypeJSON && onControl != nil {
+			var msg model.ControlMsg
+			if json.Unmarshal(packet.Payload, &msg) == nil && msg.Cmd != "" {
+				onControl(msg)
+			}
 		}
 	}
 }

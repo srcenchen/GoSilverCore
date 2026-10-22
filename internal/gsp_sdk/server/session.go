@@ -25,6 +25,8 @@ type Peer struct {
 	conn        net.Conn
 	connNum     int
 	speedEwma   float64
+	zone        string
+	lastFailure time.Time
 	failStreak  int
 	cooldownTil time.Time
 	leases      map[string]time.Time
@@ -51,6 +53,10 @@ type Session struct {
 	isMain        bool          // 是否为主发送端
 	done          chan struct{} // 关闭通道
 	uploadSem     chan struct{} // 并发上传限制 (限流信号量)
+	coordinating  bool
+	prefetch      func(int64)
+	uploadLimit   int
+	backoffUntil  time.Time
 }
 
 func NewGspSession(addr string, mempool *mempool.MemPool) *Session {
@@ -281,7 +287,6 @@ func (s *Session) BeSendMain(f *os.File) error {
 	}
 	ck := chunk.NewFileChunk(f, s.memPool)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	nums := ck.GetChunkNum()
 	s.chunkProvider = *ck
 	s.isMain = true
@@ -296,6 +301,8 @@ func (s *Session) BeSendMain(f *os.File) error {
 		}
 		s.ChunkOwners[i][s.UUID] = struct{}{}
 	}
+	s.mu.Unlock()
+	s.StartCoordinator()
 	return nil
 }
 

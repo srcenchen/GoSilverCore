@@ -2,11 +2,13 @@ package server
 
 import (
 	"encoding/json"
+	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk/model"
 	"log/slog"
 	"math"
 	"net"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -14,7 +16,6 @@ import (
 const (
 	leaseTTL    = 45 * time.Second
 	maxInflight = 2
-	baseWeight  = 20.0
 )
 
 type queue2 struct {
@@ -26,77 +27,131 @@ func (q *queue2) Want(i int64, conn net.Conn) {
 }
 
 func (q *queue2) WantFor(i int64, conn net.Conn, requester string) {
-	bestUUID, targetAddr := q.pickFor(i, conn, requester)
+	q.WantRequest(model.WantChunkReq{Index: i, UUID: requester, Want: 1}, conn)
+}
 
-	jc, err := json.Marshal(model.WantChunkResp{
-		Index:    i,
-		Addr:     targetAddr,
-		CheckSum: 0,
-		UUID:     bestUUID,
-	})
-	if err != nil {
-		return
+func (q *queue2) WantRequest(req model.WantChunkReq, conn net.Conn) {
+	q.s.mu.Lock()
+	candidates := q.candidatesLocked(req, conn)
+	n := req.Want
+	if n <= 0 {
+		n = 1
 	}
-	c := gsp.Codec{}
-	if err := c.EncodeTo(conn, gsp.TypeJSON, jc); err != nil {
+	n = min(n, _const.SchedMaxSourcesPerWant, len(candidates))
+	sources := make([]model.SourceCandidate, 0, n)
+	for _, c := range candidates[:n] {
+		sources = append(sources, model.SourceCandidate{Addr: c.addr, UUID: c.uuid})
+	}
+	first := candidates[0]
+	q.leaseLocked(first.uuid, req.Index, req.UUID)
+	checksum := q.s.chunkHash[req.Index]
+	q.s.mu.Unlock()
+	response, _ := json.Marshal(model.WantChunkResp{Index: req.Index, Addr: first.addr, UUID: first.uuid, CheckSum: checksum, Sources: sources})
+	if err := (&gsp.Codec{}).EncodeTo(conn, gsp.TypeJSON, response); err != nil {
 		slog.Error("发送 WantChunkResp 失败", "error", err)
-		q.release(bestUUID, i, requester)
+		q.release(first.uuid, req.Index, req.UUID)
 	}
 }
 
+type scoredCandidate struct {
+	uuid, addr string
+	score      float64
+}
+
+func scoreSource(up float64, connections int, locality, failures float64) float64 {
+	return up / float64(connections+1) * locality * math.Pow(0.5, failures)
+}
+func localityFactor(source, requester string) float64 {
+	if source == zoneOfCentral || requester == "" || source == requester {
+		return 1
+	}
+	return _const.SchedCrossZoneFactor
+}
+func (q *queue2) candidatesLocked(req model.WantChunkReq, conn net.Conn) []scoredCandidate {
+	now := time.Now()
+	q.s.expireLeasesLocked(now)
+	zone := req.Zone
+	if zone == "" {
+		if p := q.s.Peers[req.UUID]; p != nil {
+			zone = p.zone
+		}
+	}
+	if zone == "" && conn != nil {
+		zone = zoneOf(conn.RemoteAddr().String(), "")
+	}
+	localOwners := 0
+	var result []scoredCandidate
+	for id := range q.s.ChunkOwners[req.Index] {
+		if id == req.UUID {
+			continue
+		}
+		p := q.s.Peers[id]
+		if p == nil || id == q.s.UUID {
+			continue
+		}
+		if p.zone == zone {
+			localOwners++
+		}
+		if now.Before(p.cooldownTil) || p.connNum >= maxInflight {
+			continue
+		}
+		failures := float64(p.failStreak)
+		if !p.lastFailure.IsZero() {
+			failures *= math.Pow(0.5, now.Sub(p.lastFailure).Seconds()/_const.SchedFailHalfLifeSec)
+		}
+		speed := p.speedEwma
+		if speed <= 0 {
+			speed = _const.SchedColdStartMbps
+		}
+		result = append(result, scoredCandidate{id, p.connAddr, scoreSource(speed, p.connNum, localityFactor(p.zone, zone), failures)})
+	}
+	central := q.s.Peers[q.s.UUID]
+	speed := float64(_const.SchedColdStartMbps)
+	connections := 0
+	if central != nil {
+		connections = central.connNum
+		if central.speedEwma > 0 {
+			speed = central.speedEwma
+		}
+	}
+	score := scoreSource(speed, connections, 1, 0)
+	if localOwners == 0 && zone != "" {
+		score *= 1e9
+	}
+	result = append(result, scoredCandidate{q.s.UUID, "", score})
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].score == result[j].score {
+			return result[i].uuid < result[j].uuid
+		}
+		return result[i].score > result[j].score
+	})
+	return result
+}
+func (q *queue2) leaseLocked(id string, index int64, requester string) {
+	p := q.s.Peers[id]
+	if p == nil {
+		p = &Peer{leases: map[string]time.Time{}}
+		q.s.Peers[id] = p
+	}
+	if p.leases == nil {
+		p.leases = map[string]time.Time{}
+	}
+	lease := leaseKey(requester, index)
+	if _, exists := p.leases[lease]; !exists {
+		p.connNum++
+	}
+	p.leases[lease] = time.Now().Add(leaseTTL)
+}
 func (q *queue2) pick(i int64, conn net.Conn) (string, string) { return q.pickFor(i, conn, "") }
 func (q *queue2) pickFor(i int64, conn net.Conn, requester string) (string, string) {
-	now := time.Now()
 	q.s.mu.Lock()
 	defer q.s.mu.Unlock()
-
 	if requester == "" {
 		requester = q.s.peerByConn(conn)
 	}
-	q.s.expireLeasesLocked(now)
-
-	var bestUUID string
-	var maxScore float64 = -1
-	for uid := range q.s.ChunkOwners[i] {
-		if uid == requester {
-			continue
-		}
-		peer := q.s.Peers[uid]
-		if peer == nil || now.Before(peer.cooldownTil) || peer.connNum >= maxInflight {
-			continue
-		}
-		speed := peer.speedEwma
-		if speed <= 0 {
-			speed = baseWeight
-		}
-		failPenalty := math.Pow(2, float64(peer.failStreak))
-		score := speed / (float64(peer.connNum+1) * failPenalty)
-		if score > maxScore {
-			maxScore = score
-			bestUUID = uid
-		}
-	}
-	if bestUUID == "" {
-		bestUUID = q.s.UUID
-	}
-	peer := q.s.Peers[bestUUID]
-	if peer == nil {
-		peer = &Peer{leases: map[string]time.Time{}}
-		q.s.Peers[bestUUID] = peer
-	}
-	if peer.leases == nil {
-		peer.leases = map[string]time.Time{}
-	}
-	lease := leaseKey(requester, i)
-	if _, ok := peer.leases[lease]; !ok {
-		peer.connNum++
-	}
-	peer.leases[lease] = now.Add(leaseTTL)
-
-	if bestUUID == q.s.UUID {
-		return bestUUID, ""
-	}
-	return bestUUID, peer.connAddr
+	candidate := q.candidatesLocked(model.WantChunkReq{Index: i, UUID: requester}, conn)[0]
+	q.leaseLocked(candidate.uuid, i, requester)
+	return candidate.uuid, candidate.addr
 }
 
 func (q *queue2) release(uuid string, index int64, requester string) {

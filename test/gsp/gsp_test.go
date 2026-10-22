@@ -275,3 +275,73 @@ func TestUnreadyAndChangedSourcesReturnReasonInsteadOfEOF(t *testing.T) {
 		t.Fatalf("source change returned unclear error: %v", err)
 	}
 }
+
+func TestDownloadFailsOverToSecondPeerBeforeCenter(t *testing.T) {
+	data := bytes.Repeat([]byte("candidate"), 1000)
+	path := filepath.Join(t.TempDir(), "payload.bin")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	pool := mempool.NewMemPool(_const.ChunkSize)
+	center := server.NewGspSession("127.0.0.1:0", pool)
+	if err = center.BeSendMain(f); err != nil {
+		t.Fatal(err)
+	}
+	if err = center.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer center.Stop()
+	good := server.NewGspSession("127.0.0.1:0", pool)
+	if err = good.BeSendMain(f); err != nil {
+		t.Fatal(err)
+	}
+	if err = good.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer good.Stop()
+	goodAddr := fmt.Sprintf("127.0.0.1:%d", good.Port())
+	center.AddPeer("bad", "127.0.0.1:1", nil)
+	center.SetPeerZone("bad", "local")
+	center.AddBlockOwner(0, "bad")
+	center.AddPeer(good.UUID, goodAddr, nil)
+	center.SetPeerZone(good.UUID, "local")
+	center.AddBlockOwner(0, good.UUID)
+	center.UpdatePeer(center.UUID, 1, "done", 0, "")
+	center.UpdatePeer(good.UUID, 500, "done", 0, "")
+	peer := server.NewGspSession("127.0.0.1:0", pool)
+	if err = peer.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Stop()
+	addr := fmt.Sprintf("127.0.0.1:%d", center.Port())
+	sdk := client.NewGspSdk(addr, pool, peer.UUID, "local")
+	defer sdk.Close()
+	if err = sdk.PeerReg(peer.Port(), peer.UUID); err != nil {
+		t.Fatal(err)
+	}
+	meta, err := sdk.GetFileStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	usedSecond := false
+	target := filepath.Join(t.TempDir(), "payload.bin")
+	err = receiver.RunTo(context.Background(), addr, target, peer, sdk, meta, func(p receiver.Progress) {
+		for _, source := range p.Active {
+			if source.Addr == goodAddr {
+				usedSecond = true
+			}
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || !bytes.Equal(got, data) || !usedSecond {
+		t.Fatalf("second peer was not used correctly: %v, used=%v", err, usedSecond)
+	}
+}

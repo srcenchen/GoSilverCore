@@ -30,16 +30,19 @@ type GetFileStatusResp struct {
 }
 
 type WantChunkReq struct {
+	Zone    string `json:"zone,omitempty"`
+	Want    int    `json:"want,omitempty"`
 	UUID    string `json:"uuid"`
 	Operate string `json:"operate"`
 	Index   int64  `json:"index"` // 申请指定的片
 }
 
 type WantChunkResp struct {
-	Index    int64  `json:"index"`    // 申请指定的片
-	Addr     string `json:"addr"`     // 申请的片的Peer地址
-	CheckSum uint32 `json:"checkSum"` // 申请的片的哈希校验值
-	UUID     string `json:"uuid"`     // 对端的UUID信息
+	Sources  []SourceCandidate `json:"sources,omitempty"`
+	Index    int64             `json:"index"`    // 申请指定的片
+	Addr     string            `json:"addr"`     // 申请的片的Peer地址
+	CheckSum uint32            `json:"checkSum"` // 申请的片的哈希校验值
+	UUID     string            `json:"uuid"`     // 对端的UUID信息
 }
 type ReportChunkReq struct {
 	Operate string `json:"operate"`
@@ -48,9 +51,21 @@ type ReportChunkReq struct {
 }
 
 type PeerRegReq struct {
+	Zone    string `json:"zone,omitempty"`
 	Operate string `json:"operate"`
 	Port    string `json:"port"`
 	UUID    string `json:"uuid"`
+}
+
+type SourceCandidate struct {
+	Addr string `json:"addr"`
+	UUID string `json:"uuid"`
+}
+
+type ControlMsg struct {
+	Cmd   string `json:"cmd"`
+	Index int64  `json:"index,omitempty"`
+	Until int64  `json:"until,omitempty"`
 }
 
 type PushStart struct {

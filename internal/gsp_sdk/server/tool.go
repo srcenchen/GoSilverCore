@@ -106,6 +106,7 @@ func (s *Session) UpdatePeer(providerUuid string, speed int64, status string, in
 			delete(s.PeerOwners[providerUuid], index)
 		}
 		peer.failStreak++
+		peer.lastFailure = time.Now()
 		backoff := time.Duration(1<<min(peer.failStreak, 4)) * time.Second
 		peer.cooldownTil = time.Now().Add(backoff)
 		peer.speedEwma *= 0.5
@@ -128,17 +129,54 @@ func (s *Session) IsMain() bool {
 }
 
 // AcquireUploadSlot 申请一个并发上传槽，如果满了会阻塞以防止服务被拖垮
-func (s *Session) AcquireUploadSlot() error {
-	timer := time.NewTimer(30 * time.Second)
+func (s *Session) AcquireUploadSlot() error { return s.acquireUpload(30 * time.Second) }
+func (s *Session) acquireUpload(timeout time.Duration) error {
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-	select {
-	case s.uploadSem <- struct{}{}:
-		return nil
-	case <-s.done:
-		return errors.New("session stopped")
-	case <-timer.C:
-		return errors.New("upload slot timeout")
+	retry := time.NewTicker(10 * time.Millisecond)
+	defer retry.Stop()
+	for {
+		s.mu.Lock()
+		limit := s.uploadLimit
+		if limit <= 0 || limit > cap(s.uploadSem) {
+			limit = cap(s.uploadSem)
+		}
+		if time.Now().Before(s.backoffUntil) {
+			limit = min(limit, _const.UploadConcurrencyHDD)
+		}
+		acquired := false
+		select {
+		case <-s.done:
+			s.mu.Unlock()
+			return errors.New("session stopped")
+		default:
+		}
+		if len(s.uploadSem) < limit {
+			select {
+			case s.uploadSem <- struct{}{}:
+				acquired = true
+			default:
+			}
+		}
+		s.mu.Unlock()
+		if acquired {
+			return nil
+		}
+		select {
+		case <-s.done:
+			return errors.New("session stopped")
+		case <-timer.C:
+			return errors.New("upload slot timeout")
+		case <-retry.C:
+		}
 	}
+}
+func (s *Session) AcquireUpload(timeout time.Duration) bool { return s.acquireUpload(timeout) == nil }
+func (s *Session) ReleaseUpload()                           { s.ReleaseUploadSlot() }
+func (s *Session) SetUploadMax(n int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.uploadLimit = int(max(1, min(n, int64(cap(s.uploadSem)))))
 }
 
 // ReleaseUploadSlot 释放并发上传槽

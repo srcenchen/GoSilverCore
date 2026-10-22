@@ -11,18 +11,25 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
 
+type BlockSource struct {
+	Index int64  `json:"index"`
+	Addr  string `json:"addr"`
+}
+
 type Progress struct {
-	FileName string `json:"fileName"`
-	Total    int64  `json:"total"`
-	Done     int64  `json:"done"`
-	Bytes    int64  `json:"bytes"`
-	Speed    int64  `json:"speed"`
-	Err      error  `json:"-"`
-	Finished bool   `json:"finished"`
+	Active   []BlockSource `json:"active,omitempty"`
+	FileName string        `json:"fileName"`
+	Total    int64         `json:"total"`
+	Done     int64         `json:"done"`
+	Bytes    int64         `json:"bytes"`
+	Speed    int64         `json:"speed"`
+	Err      error         `json:"-"`
+	Finished bool          `json:"finished"`
 }
 type ProgressFunc func(Progress)
 
@@ -76,16 +83,49 @@ func RunTo(ctx context.Context, addr, target string, s *server.Session, sdk clie
 	defer cancel()
 	sdk = sdk.WithContext(workCtx)
 	jobs := make(chan int64)
+	priority := make(chan int64, 4)
+	s.SetPrefetchHandler(func(index int64) {
+		if index >= 0 && index < count {
+			select {
+			case priority <- index:
+			default:
+			}
+		}
+	})
+	defer s.SetPrefetchHandler(nil)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var failure error
 	var done, received int64
 	started := time.Now()
+	active := map[int64]string{}
+	claimed := map[int64]bool{}
+	emitLocked := func() {
+		if on == nil {
+			return
+		}
+		sources := make([]BlockSource, 0, len(active))
+		for i, addr := range active {
+			sources = append(sources, BlockSource{Index: i, Addr: addr})
+		}
+		sort.Slice(sources, func(i, j int) bool { return sources[i].Index < sources[j].Index })
+		speed := int64(float64(received) * 8 / time.Since(started).Seconds() / 1e6)
+		on(Progress{FileName: meta.FileName, Total: meta.ChunkNum, Done: done, Bytes: received, Speed: speed, Active: sources})
+	}
 	for range min(int64(5), count) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
+				mu.Lock()
+				skip := claimed[i] || s.HasChunk(i)
+				if !skip {
+					claimed[i] = true
+				}
+				mu.Unlock()
+				if skip {
+					continue
+				}
 				var last error
 				for attempt := 0; attempt < 3; attempt++ {
 					if err := workCtx.Err(); err != nil {
@@ -95,34 +135,61 @@ func RunTo(ctx context.Context, addr, target string, s *server.Session, sdk clie
 					if e != nil {
 						last = e
 					} else {
-						providerID := location.UUID
-						provider := location.Addr
-						if provider == "" {
-							provider = addr
+						candidates := location.Sources
+						if len(candidates) == 0 {
+							candidates = []model.SourceCandidate{{Addr: location.Addr, UUID: location.UUID}}
 						}
-						n, checksum, e := sdk.FetchChunk(provider, i, &ck)
-						if e != nil && provider != addr && workCtx.Err() == nil {
-							_ = sdk.ReportPeer(s.UUID, location.UUID, 0, "failed", i)
-							providerID = ""
-							n, checksum, e = sdk.FetchChunk(addr, i, &ck)
+						hasCentral := false
+						for _, candidate := range candidates {
+							if candidate.Addr == "" || candidate.Addr == addr {
+								hasCentral = true
+							}
 						}
+						if !hasCentral {
+							candidates = append(append([]model.SourceCandidate(nil), candidates...), model.SourceCandidate{})
+						}
+						var n int
+						var checksum uint32
+						providerID := ""
+						var sampleSpeed int64
+						for _, candidate := range candidates {
+							if workCtx.Err() != nil {
+								return
+							}
+							provider := candidate.Addr
+							if provider == "" {
+								provider = addr
+							}
+							providerID = candidate.UUID
+							mu.Lock()
+							active[i] = provider
+							emitLocked()
+							mu.Unlock()
+							attemptStart := time.Now()
+							n, checksum, e = sdk.FetchChunk(provider, i, &ck)
+							if e == nil {
+								sampleSpeed = int64(float64(n) * 8 / time.Since(attemptStart).Seconds() / 1e6)
+								break
+							}
+							_ = sdk.ReportPeer(s.UUID, providerID, 0, "failed", i)
+						}
+						mu.Lock()
+						delete(active, i)
+						mu.Unlock()
 						if e == nil {
 							s.AddChunk(i, checksum)
 							_ = sdk.ReportChunk(s.UUID, i)
 							mu.Lock()
+							delete(claimed, i)
 							done++
 							received += int64(n)
-							speed := int64(float64(received) * 8 / time.Since(started).Seconds() / 1e6)
-							if on != nil {
-								on(Progress{FileName: meta.FileName, Total: meta.ChunkNum, Done: done, Bytes: received, Speed: speed})
-							}
+							emitLocked()
 							mu.Unlock()
-							_ = sdk.ReportPeer(s.UUID, providerID, speed, "done", i)
+							_ = sdk.ReportPeer(s.UUID, providerID, sampleSpeed, "done", i)
 							last = nil
 							break
 						}
 						last = e
-						_ = sdk.ReportPeer(s.UUID, location.UUID, 0, "failed", i)
 					}
 					if attempt < 2 {
 						timer := time.NewTimer(time.Duration(attempt+1) * 200 * time.Millisecond)
@@ -148,6 +215,15 @@ func RunTo(ctx context.Context, addr, target string, s *server.Session, sdk clie
 	}
 feed:
 	for n, i := int64(0), start; n < count; n, i = n+1, (i+step)%max(int64(1), count) {
+		select {
+		case urgent := <-priority:
+			select {
+			case jobs <- urgent:
+			case <-workCtx.Done():
+				break feed
+			}
+		default:
+		}
 		select {
 		case jobs <- i:
 		case <-workCtx.Done():

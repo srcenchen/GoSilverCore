@@ -21,10 +21,18 @@ type GspSdk struct {
 	memPool  *mempool.MemPool
 	ctx      context.Context
 	control  *controlState
+	zone     string
 }
 
-func NewGspSdk(addr string, pool *mempool.MemPool) GspSdk {
-	return GspSdk{srvAddr: addr, connPool: conn_pool.NewConnPool(10), memPool: pool, ctx: context.Background(), control: &controlState{}}
+func NewGspSdk(addr string, pool *mempool.MemPool, identity ...string) GspSdk {
+	g := GspSdk{srvAddr: addr, connPool: conn_pool.NewConnPool(10), memPool: pool, ctx: context.Background(), control: &controlState{}}
+	if len(identity) > 0 {
+		g.control.peerID = identity[0]
+	}
+	if len(identity) > 1 {
+		g.zone = identity[1]
+	}
+	return g
 }
 func (g GspSdk) WithContext(ctx context.Context) GspSdk { g.ctx = ctx; return g }
 func (g *GspSdk) Close() {

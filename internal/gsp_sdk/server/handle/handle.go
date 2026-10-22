@@ -65,7 +65,11 @@ func WantChunk(conn net.Conn, data []byte, tool ToolSession) {
 		return
 	}
 	q := tool.GetQueue()
-	if fq, ok := q.(interface{ WantFor(int64, net.Conn, string) }); ok {
+	if fq, ok := q.(interface {
+		WantRequest(model.WantChunkReq, net.Conn)
+	}); ok {
+		fq.WantRequest(wc, conn)
+	} else if fq, ok := q.(interface{ WantFor(int64, net.Conn, string) }); ok {
 		fq.WantFor(wc.Index, conn, wc.UUID)
 	} else {
 		q.Want(wc.Index, conn)
@@ -144,6 +148,9 @@ func PeerReg(conn net.Conn, data []byte, tool ToolSession) {
 		return
 	}
 	tool.AddPeer(wc.UUID, net.JoinHostPort(host, wc.Port), conn)
+	if zones, ok := tool.(interface{ SetPeerZone(string, string) }); ok {
+		zones.SetPeerZone(wc.UUID, wc.Zone)
+	}
 	defer tool.RemovePeer(wc.UUID)
 	_ = conn.SetReadDeadline(time.Time{})
 	var one [1]byte

@@ -358,7 +358,7 @@ func (a *App) startAgent(ctx context.Context, c Config) error {
 	r.watchWG.Add(1)
 	go func() {
 		defer r.watchWG.Done()
-		sdk.Watch(nil, func() { r.mu.Lock(); r.disconnected = true; r.mu.Unlock() })
+		sdk.WatchControl(nil, r.session.ApplyControl, func() { r.mu.Lock(); r.disconnected = true; r.mu.Unlock() })
 	}()
 	return nil
 }
