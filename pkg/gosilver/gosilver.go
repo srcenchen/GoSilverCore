@@ -6,350 +6,187 @@ import (
 	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/gsp_sdk/client"
 	"go-silver-core/internal/gsp_sdk/server"
+	"go-silver-core/internal/receiver"
 	"go-silver-core/pkg/mempool"
-	"math/rand/v2"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
-	"time"
 )
 
-// ProgressInfo 包含当前的下载进度状态
 type ProgressInfo struct {
-	TotalChunks int64   // 总分块数
-	Downloaded  int64   // 已下载的分块数
-	Percentage  float64 // 下载百分比 (0.0 到 100.0)
-	SpeedMbps   int64   // 当前下载速度 (Mbps)
-	Status      string  // 状态: "idle", "downloading", "completed", "failed", "cancelled"
-	Error       error   // 错误信息 (如果失败)
+	TotalChunks int64
+	Downloaded  int64
+	Percentage  float64
+	SpeedMbps   int64
+	Status      string
+	Error       error
 }
-
-// Server 用于管理文件分发主服务端 (Sender) 的启动和停止
 type Server struct {
-	addr     string
-	filePath string
-	mp       *mempool.MemPool
-	session  *server.Session
-	file     *os.File
+	mu             sync.Mutex
+	addr, filePath string
+	session        *server.Session
+	file           *os.File
 }
 
-// NewServer 创建一个新的服务端实例
-// addr: 服务端监听地址，例如 ":48080"
-// filePath: 要分发的文件路径
-func NewServer(addr string, filePath string) *Server {
-	return &Server{
-		addr:     addr,
-		filePath: filePath,
-	}
-}
-
-// Start 启动服务端并开始监听和分块
+func NewServer(addr, path string) *Server { return &Server{addr: addr, filePath: path} }
 func (s *Server) Start() error {
-	s.mp = mempool.NewMemPool(_const.ChunkSize)
-	s.session = server.NewGspSession(s.addr, s.mp)
-	
-	if err := s.session.Start(); err != nil {
-		return err
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.session != nil {
+		return fmt.Errorf("server already started")
 	}
-	
 	f, err := os.Open(s.filePath)
 	if err != nil {
-		s.session.Stop()
 		return err
 	}
-	s.file = f
-	
-	if err := s.session.BeSendMain(f); err != nil {
+	session := server.NewGspSession(s.addr, mempool.NewMemPool(_const.ChunkSize))
+	if err = session.BeSendMain(f); err == nil {
+		err = session.Start()
+	}
+	if err != nil {
+		session.Stop()
 		f.Close()
-		s.session.Stop()
 		return err
 	}
-	
+	s.session, s.file = session, f
 	return nil
 }
-
-// Stop 停止服务端监听并关闭文件
+func (s *Server) Port() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.session == nil {
+		return 0
+	}
+	return s.session.Port()
+}
 func (s *Server) Stop() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.session != nil {
 		s.session.Stop()
+		s.session = nil
 	}
 	if s.file != nil {
-		_ = s.file.Close()
+		s.file.Close()
 		s.file = nil
 	}
 }
 
-// Client 用于管理文件接收客户端 (Receiver) 的下载和 P2P 上报
 type Client struct {
-	senderAddr string
-	saveDir    string
-	peerPort   int
-	mp         *mempool.MemPool
-	session    *server.Session
-	file       *os.File
-	
-	mu         sync.Mutex
-	status     ProgressInfo
-	progressCh chan ProgressInfo
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
+	lifecycle           sync.Mutex
+	mu                  sync.Mutex
+	senderAddr, saveDir string
+	status              ProgressInfo
+	progressCh          chan ProgressInfo
+	cancel              context.CancelFunc
+	wg                  sync.WaitGroup
+	session             *server.Session
+	sdk                 *client.GspSdk
 }
 
-// NewClient 创建一个新的客户端实例
-// senderAddr: 主发送端/服务端的地址，例如 "192.168.1.10:48080"
-// saveDir: 文件保存目录，如果为空则保存在当前目录
-func NewClient(senderAddr string, saveDir string) *Client {
-	return &Client{
-		senderAddr: senderAddr,
-		saveDir:    saveDir,
-		progressCh: make(chan ProgressInfo, 100),
-		status: ProgressInfo{
-			Status: "idle",
-		},
-	}
+func NewClient(addr, dir string) *Client {
+	return &Client{senderAddr: addr, saveDir: dir, status: ProgressInfo{Status: "idle"}}
 }
-
-// StartDownload 启动非阻塞的文件下载过程，返回一个用于接收进度反馈的通道
 func (c *Client) StartDownload() (<-chan ProgressInfo, error) {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.status.Status == "downloading" {
-		return nil, fmt.Errorf("download already in progress")
+	if c.status.Status != "idle" {
+		return nil, fmt.Errorf("create a new client for another download")
 	}
-
-	c.status = ProgressInfo{
-		Status: "downloading",
-	}
-	
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
-	
+	c.progressCh = make(chan ProgressInfo, 16)
+	c.status = ProgressInfo{Status: "downloading"}
 	c.wg.Add(1)
-	go c.runDownload(ctx)
-	
+	go c.run(ctx)
 	return c.progressCh, nil
 }
-
-// CancelDownload 取消当前的下载，并同步阻塞直到协程完全退出并释放所有资源
 func (c *Client) CancelDownload() {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
 	c.mu.Lock()
 	if c.cancel != nil {
 		c.cancel()
 	}
 	c.mu.Unlock()
 	c.wg.Wait()
+	if c.sdk != nil {
+		c.sdk.Close()
+	}
+	if c.session != nil {
+		c.session.Stop()
+	}
 }
-
-// GetStatus 获取当前的下载状态副本
-func (c *Client) GetStatus() ProgressInfo {
+func (c *Client) GetStatus() ProgressInfo { c.mu.Lock(); defer c.mu.Unlock(); return c.status }
+func (c *Client) emit(p ProgressInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.status
-}
-
-func (c *Client) updateProgress(info ProgressInfo) {
+	c.status = p
 	select {
-	case c.progressCh <- info:
+	case c.progressCh <- p:
 	default:
-		// 如果通道满了，移除旧消息放入新消息，防止阻塞下载过程
 		select {
 		case <-c.progressCh:
 		default:
 		}
-		select {
-		case c.progressCh <- info:
-		default:
-		}
+		c.progressCh <- p
 	}
 }
-
-func (c *Client) finishWithError(err error, contextMsg string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.status.Status = "failed"
-	c.status.Error = fmt.Errorf("%s: %w", contextMsg, err)
-	c.updateProgress(c.status)
-}
-
-func (c *Client) finishCancelled() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.status.Status = "cancelled"
-	c.status.Error = context.Canceled
-	c.updateProgress(c.status)
-}
-
-func (c *Client) runDownload(ctx context.Context) {
+func (c *Client) run(ctx context.Context) {
 	defer c.wg.Done()
-	
-	c.mp = mempool.NewMemPool(_const.ChunkSize)
-	
-	// 随机分配子节点端口
-	c.peerPort = rand.IntN(999) + 3000
-	c.session = server.NewGspSession(":"+strconv.Itoa(c.peerPort), c.mp)
-	if err := c.session.Start(); err != nil {
-		c.finishWithError(err, "failed to start peer server")
-		return
-	}
-	defer c.session.Stop()
-
-	gspC := client.NewGspSdk(c.senderAddr, c.mp)
-	status, err := gspC.GetFileStatus()
+	defer close(c.progressCh)
+	err := c.download(ctx)
 	if err != nil {
-		c.finishWithError(err, "failed to get file status")
-		return
-	}
-
-	c.mu.Lock()
-	c.status.TotalChunks = status.ChunkNum
-	c.mu.Unlock()
-
-	fileName := "gs-" + status.FileName
-	if c.saveDir != "" {
-		fileName = filepath.Join(c.saveDir, fileName)
-	}
-
-	f, err := os.Create(fileName)
-	if err != nil {
-		c.finishWithError(err, "failed to create local file")
-		return
-	}
-	c.file = f
-	defer func() {
-		if c.file != nil {
-			_ = c.file.Close()
-			c.file = nil
+		state := "failed"
+		if ctx.Err() != nil {
+			state = "cancelled"
 		}
-	}()
-
-	if err := f.Truncate(status.FileSize); err != nil {
-		c.finishWithError(err, "failed to truncate file")
-		return
+		p := c.GetStatus()
+		p.Status = state
+		p.Error = err
+		c.emit(p)
+		if c.sdk != nil {
+			c.sdk.Close()
+		}
+		if c.session != nil {
+			c.session.Stop()
+		}
 	}
-
-	c.session.BeSendSub(f)
-	ck := c.session.GetChunk()
-
-	// 注册 Peer
-	if err := gspC.PeerReg(c.peerPort, c.session.UUID); err != nil {
-		c.finishWithError(err, "failed to register peer")
-		return
+}
+func (c *Client) download(ctx context.Context) error {
+	pool := mempool.NewMemPool(_const.ChunkSize)
+	s := server.NewGspSession(":0", pool)
+	c.session = s
+	if err := s.Start(); err != nil {
+		return err
 	}
-
-	// 准备分块索引
-	indices := make([]int64, status.ChunkNum)
-	for i := range indices {
-		indices[i] = int64(i)
+	sdk := client.NewGspSdk(c.senderAddr, pool).WithContext(ctx)
+	c.sdk = &sdk
+	meta, err := sdk.GetFileStatus()
+	if err != nil {
+		return fmt.Errorf("get sender file status: %w", err)
 	}
-
-	// 打乱顺序，优化局域网 P2P
-	rand.Shuffle(len(indices), func(i, j int) {
-		indices[i], indices[j] = indices[j], indices[i]
+	if err = sdk.PeerReg(s.Port(), s.UUID); err != nil {
+		return err
+	}
+	dir := c.saveDir
+	if dir == "" {
+		dir = "."
+	}
+	if err = os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	return receiver.RunTo(ctx, c.senderAddr, filepath.Join(dir, filepath.Base(meta.FileName)), s, sdk, meta, func(p receiver.Progress) {
+		state := "downloading"
+		if p.Finished {
+			state = "completed"
+		}
+		percent := 100.0
+		if p.Total > 0 {
+			percent = float64(p.Done) * 100 / float64(p.Total)
+		}
+		c.emit(ProgressInfo{TotalChunks: p.Total, Downloaded: p.Done, Percentage: percent, SpeedMbps: p.Speed, Status: state})
 	})
-
-	var downloadedCount int64
-
-	for len(indices) > 0 {
-		select {
-		case <-ctx.Done():
-			c.finishCancelled()
-			return
-		default:
-		}
-
-		var failedList []int64
-		var mu sync.Mutex
-		var wg sync.WaitGroup
-		limit := make(chan struct{}, 5) // 控制并发数
-
-		for _, idx := range indices {
-			select {
-			case <-ctx.Done():
-				c.finishCancelled()
-				return
-			default:
-			}
-
-			wg.Add(1)
-			limit <- struct{}{}
-
-			go func(i int64) {
-				defer wg.Done()
-				defer func() { <-limit }()
-
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-
-				// 询问 Tracker 分块位置
-				reChunk, err := gspC.WantChunk(i)
-				if err != nil {
-					mu.Lock()
-					failedList = append(failedList, i)
-					mu.Unlock()
-					return
-				}
-
-				targetAddr := reChunk.Addr
-				if targetAddr == "" {
-					targetAddr = c.senderAddr
-				}
-
-				// 开始下载
-				tBegin := time.Now()
-				_, cm, err := gspC.GetChunk(targetAddr, i, &ck)
-				if err != nil {
-					// 上报失败，以扣减提供端的并发连接数
-					_ = gspC.ReportPeer(c.session.UUID, reChunk.UUID, 0, "failed")
-					mu.Lock()
-					failedList = append(failedList, i)
-					mu.Unlock()
-					return
-				}
-
-				duration := time.Since(tBegin).Microseconds()
-				var speedMbps int64 = 0
-				if duration > 0 {
-					speedMbps = (_const.ChunkSize / duration) * 8
-				}
-
-				c.session.AddChunk(i, cm)
-				_ = gspC.ReportChunk(c.session.UUID, i)
-				_ = gspC.ReportPeer(c.session.UUID, reChunk.UUID, speedMbps, "done")
-
-				c.mu.Lock()
-				downloadedCount++
-				c.status.Downloaded = downloadedCount
-				if status.ChunkNum > 0 {
-					c.status.Percentage = float64(downloadedCount) / float64(status.ChunkNum) * 100
-				}
-				c.status.SpeedMbps = speedMbps
-				c.updateProgress(c.status)
-				c.mu.Unlock()
-			}(idx)
-		}
-		wg.Wait()
-
-		select {
-		case <-ctx.Done():
-			c.finishCancelled()
-			return
-		default:
-		}
-
-		indices = failedList
-		if len(indices) > 0 {
-			time.Sleep(500 * time.Millisecond) // 退避重试
-		}
-	}
-
-	c.mu.Lock()
-	c.status.Status = "completed"
-	c.status.Percentage = 100.0
-	c.status.SpeedMbps = 0
-	c.updateProgress(c.status)
-	c.mu.Unlock()
 }

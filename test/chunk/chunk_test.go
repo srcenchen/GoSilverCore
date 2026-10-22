@@ -1,45 +1,64 @@
-package chunk
+package chunk_test
 
 import (
-	"fmt"
+	"bytes"
 	"go-silver-core/internal/chunk"
-	"hash/crc32"
+	_const "go-silver-core/internal/const"
+	"go-silver-core/pkg/mempool"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
-func TestFileChunk(t *testing.T) {
-	f, err := os.Open("test.apk")
+func TestChunkRoundTripAndBounds(t *testing.T) {
+	data := bytes.Repeat([]byte("Silver"), _const.ChunkSize/6+31)
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source")
+	if err := os.WriteFile(source, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	in, err := os.Open(source)
 	if err != nil {
-		t.Fatal("文件打开失败")
+		t.Fatal(err)
 	}
-	defer f.Close()
-	c := chunk.NewFileChunk(f)
-	fileHash := map[int64]string{}
-	for i := int64(0); i < c.GetChunkNum(); i++ {
-		buf, _ := c.ReadChunk(i)
-		checksum := crc32.ChecksumIEEE(buf)
-		fileHash[i] = fmt.Sprintf("%x", checksum)
-		t.Logf("第 %d / %d 块的 crc32 值为 %x", i+1, c.GetChunkNum(), checksum)
+	defer in.Close()
+	out, err := os.Create(filepath.Join(dir, "out"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	fs, _ := f.Stat()
-	fNew, _ := os.Create("out.apk")
-	fNew.Truncate(fs.Size())
-	cNew := chunk.NewFileChunk(fNew)
-	for i := int64(0); i < c.GetChunkNum(); i++ {
-		buf, _ := c.ReadChunk(i)
-		cNew.Save(i, buf)
+	defer out.Close()
+	if err = out.Truncate(int64(len(data))); err != nil {
+		t.Fatal(err)
 	}
-	// 判断哈希值是否相同
-	t.Logf("准备校验Hash")
-	for i := int64(0); i < cNew.GetChunkNum(); i++ {
-		buf, _ := cNew.ReadChunk(i)
-		checksum := crc32.ChecksumIEEE(buf)
-		t.Logf("第 %d / %d 块的 crc32 值为 %x", i+1, cNew.GetChunkNum(), checksum)
-		if fmt.Sprintf("%x", checksum) != fileHash[i] {
-			t.Fatal("哈希值不同！")
+	pool := mempool.NewMemPool(_const.ChunkSize)
+	a, b := chunk.NewFileChunk(in, pool), chunk.NewFileChunk(out, pool)
+	buf := make([]byte, _const.ChunkSize)
+	for i := int64(0); i < a.GetChunkNum(); i++ {
+		n, err := a.ReadChunk(i, buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = b.Save(i, buf[:n]); err != nil {
+			t.Fatal(err)
 		}
 	}
-	fNew.Close()
-
+	got, err := os.ReadFile(out.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("file mismatch")
+	}
+	if _, err = a.ReadChunk(-1, buf); err == nil {
+		t.Fatal("negative index accepted")
+	}
+	if _, err = a.ReadChunk(0, buf[:1]); err == nil {
+		t.Fatal("short buffer accepted")
+	}
+	if err = b.Save(0, []byte{1}); err == nil {
+		t.Fatal("short chunk accepted")
+	}
+	if err = b.Save(b.GetChunkNum(), buf); err == nil {
+		t.Fatal("out of bounds write accepted")
+	}
 }

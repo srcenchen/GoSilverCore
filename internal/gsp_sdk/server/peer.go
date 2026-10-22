@@ -1,11 +1,26 @@
 package server
 
+import (
+	"net"
+	"time"
+)
+
 // AddPeer 对端注册
-func (s *Session) AddPeer(uuid string, addr string) {
+func (s *Session) AddPeer(uuid string, addr string, conn net.Conn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if p, ok := s.Peers[uuid]; ok {
+		p.connAddr = addr
+		p.conn = conn
+		if p.leases == nil {
+			p.leases = map[string]time.Time{}
+		}
+		return
+	}
 	s.Peers[uuid] = &Peer{
 		connAddr: addr,
+		conn:     conn,
+		leases:   map[string]time.Time{},
 	}
 }
 
@@ -28,6 +43,9 @@ func (s *Session) RemovePeer(uuid string) {
 func (s *Session) AddBlockOwner(i int64, uuid string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.chunkProvider.FileStat == nil || i < 0 || i >= s.chunkProvider.GetChunkNum() || s.Peers[uuid] == nil {
+		return
+	}
 	if s.ChunkOwners[i] == nil {
 		s.ChunkOwners[i] = make(map[string]struct{})
 	}

@@ -1,45 +1,34 @@
 package mempool
 
+// MemPool lazily caches buffers. Borrowing never blocks behind file transfers.
 type MemPool struct {
 	size int64
-	// 使用 chan 代替 sync.Pool 来实现硬上限
-	ch chan *[]byte
+	ch   chan *[]byte
 }
 
-func NewMemPool(size int64) *MemPool {
-	poolCount := 50
-	m := &MemPool{
-		size: size,
-		ch:   make(chan *[]byte, poolCount),
+func NewMemPool(size int64) *MemPool { return &MemPool{size: size, ch: make(chan *[]byte, 16)} }
+func (m *MemPool) Get(size int64) *[]byte {
+	if size < 0 {
+		size = 0
 	}
-	for i := 0; i < poolCount; i++ {
-		t := make([]byte, size)
-		m.ch <- &t
+	if size == m.size {
+		select {
+		case p := <-m.ch:
+			*p = (*p)[:size]
+			return p
+		default:
+		}
 	}
-	return m
-}
-
-func (mp *MemPool) Get(size int64) *[]byte {
-	// 非合法大小
-	if size > mp.size {
-		t := make([]byte, size)
-		return &t
-	}
-	t := <-mp.ch
-	p := (*t)[:size]
+	p := make([]byte, size)
 	return &p
 }
-
-func (mp *MemPool) Put(p *[]byte) {
-	// 检查大小是否正确
-	if p == nil || int64(cap(*p)) != mp.size {
+func (m *MemPool) Put(p *[]byte) {
+	if p == nil || int64(cap(*p)) != m.size {
 		return
 	}
-	// 恢复长度，写回 Channel 供其他线程复用
-	*p = (*p)[:mp.size]
+	*p = (*p)[:m.size]
 	select {
-	case mp.ch <- p:
+	case m.ch <- p:
 	default:
-		// 如果池子满了还往里塞，说明归还逻辑有问题，直接丢弃即可
 	}
 }

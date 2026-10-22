@@ -1,7 +1,10 @@
 package queue
 
 import (
+	"encoding/json"
 	"go-silver-core/internal/chunk"
+	"go-silver-core/internal/gsp"
+	"go-silver-core/internal/gsp_sdk/model"
 	"go-silver-core/pkg/mempool"
 	"net"
 )
@@ -33,8 +36,10 @@ func NewDownloadQueue() DownloadQueue {
 // Want 当有人要加入队列，此函数就会被调用
 // 第一个参数是块的序号，从0开始。第二个是连接的实体。
 func (d *downloadQueue) Want(i int64, conn net.Conn) {
-	//TODO implement me
-	panic("implement me")
+	payload, _ := json.Marshal(model.WantChunkResp{Index: i})
+	if (&gsp.Codec{}).EncodeTo(conn, gsp.TypeJSON, payload) != nil {
+		_ = conn.Close()
+	}
 }
 
 // send 将获取到的设备信息发送给对应的设备

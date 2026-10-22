@@ -5,83 +5,158 @@ import (
 	"go-silver-core/internal/gsp"
 	"go-silver-core/internal/gsp_sdk/model"
 	"log/slog"
+	"math"
 	"net"
+	"strconv"
+	"time"
 )
 
-// TODO 测试用队列
+const (
+	leaseTTL    = 45 * time.Second
+	maxInflight = 2
+	baseWeight  = 20.0
+)
+
 type queue2 struct {
 	s *Session
 }
 
 func (q *queue2) Want(i int64, conn net.Conn) {
-	c := gsp.Codec{}
+	q.WantFor(i, conn, "")
+}
 
-	// 锁定 Session 读取数据，保证线程安全
-	q.s.mu.RLock()
+func (q *queue2) WantFor(i int64, conn net.Conn, requester string) {
+	bestUUID, targetAddr := q.pickFor(i, conn, requester)
+
+	jc, err := json.Marshal(model.WantChunkResp{
+		Index:    i,
+		Addr:     targetAddr,
+		CheckSum: 0,
+		UUID:     bestUUID,
+	})
+	if err != nil {
+		return
+	}
+	c := gsp.Codec{}
+	if err := c.EncodeTo(conn, gsp.TypeJSON, jc); err != nil {
+		slog.Error("发送 WantChunkResp 失败", "error", err)
+		q.release(bestUUID, i, requester)
+	}
+}
+
+func (q *queue2) pick(i int64, conn net.Conn) (string, string) { return q.pickFor(i, conn, "") }
+func (q *queue2) pickFor(i int64, conn net.Conn, requester string) (string, string) {
+	now := time.Now()
+	q.s.mu.Lock()
+	defer q.s.mu.Unlock()
+
+	if requester == "" {
+		requester = q.s.peerByConn(conn)
+	}
+	q.s.expireLeasesLocked(now)
 
 	var bestUUID string
-	var maxScore float64 = -1.0
-	const baseWeight = 10.0
-	// 1. 遍历所有拥有此分块的 Peer
-	owners := q.s.ChunkOwners[i]
-	if len(owners) == 0 {
-		// 如果没人有，默认指向自己（或者报错）
-		bestUUID = q.s.UUID
-	} else {
-		for uid := range owners {
-			if uid == q.s.UUID {
-				continue
-			}
-
-			peer, ok := q.s.Peers[uid]
-			if !ok {
-				continue
-			}
-
-			// 核心算法：基础权重+实际速度 / (连接数+1)的平方
-			// 使用平方来快速衰减高并发节点的分数
-			denominator := float64(peer.connNum + 1)
-			score := (baseWeight + float64(peer.maxSpeed)) / (denominator * denominator)
-
-			if score > maxScore {
-				maxScore = score
-				bestUUID = uid
-			}
+	var maxScore float64 = -1
+	for uid := range q.s.ChunkOwners[i] {
+		if uid == requester {
+			continue
+		}
+		peer := q.s.Peers[uid]
+		if peer == nil || now.Before(peer.cooldownTil) || peer.connNum >= maxInflight {
+			continue
+		}
+		speed := peer.speedEwma
+		if speed <= 0 {
+			speed = baseWeight
+		}
+		failPenalty := math.Pow(2, float64(peer.failStreak))
+		score := speed / (float64(peer.connNum+1) * failPenalty)
+		if score > maxScore {
+			maxScore = score
+			bestUUID = uid
 		}
 	}
-
-	// 如果遍历完发现没有合适的第三方节点，回退到自己
 	if bestUUID == "" {
 		bestUUID = q.s.UUID
 	}
-
-	// 获取最终选定的 Peer 信息
-	targetPeer, ok := q.s.Peers[bestUUID]
-	var targetAddr string
-	if !ok || bestUUID == q.s.UUID {
-		bestUUID = q.s.UUID
-		targetAddr = "" // Session 自身的地址
-	} else {
-		targetAddr = targetPeer.connAddr
+	peer := q.s.Peers[bestUUID]
+	if peer == nil {
+		peer = &Peer{leases: map[string]time.Time{}}
+		q.s.Peers[bestUUID] = peer
 	}
-	q.s.mu.RUnlock() // 释放读锁
+	if peer.leases == nil {
+		peer.leases = map[string]time.Time{}
+	}
+	lease := leaseKey(requester, i)
+	if _, ok := peer.leases[lease]; !ok {
+		peer.connNum++
+	}
+	peer.leases[lease] = now.Add(leaseTTL)
 
-	// 3. 更新连接数计数（需要写锁）
+	if bestUUID == q.s.UUID {
+		return bestUUID, ""
+	}
+	return bestUUID, peer.connAddr
+}
+
+func (q *queue2) release(uuid string, index int64, requester string) {
+	lease := leaseKey(requester, index)
 	q.s.mu.Lock()
-	if p, ok := q.s.Peers[bestUUID]; ok {
-		p.connNum++
+	defer q.s.mu.Unlock()
+	peer := q.s.Peers[uuid]
+	if peer == nil || peer.leases == nil {
+		return
 	}
-	q.s.mu.Unlock()
-
-	// 4. 编码并发送响应
-	jc, _ := json.Marshal(model.WantChunkResp{
-		Index:    i,
-		Addr:     targetAddr,
-		CheckSum: 0, // 实际应用中应计算校验和
-		UUID:     bestUUID,
-	})
-
-	if err := c.EncodeTo(conn, gsp.TypeJSON, jc); err != nil {
-		slog.Error("发送 WantChunkResp 失败", "error", err)
+	if _, ok := peer.leases[lease]; !ok {
+		return
 	}
+	delete(peer.leases, lease)
+	if peer.connNum > 0 {
+		peer.connNum--
+	}
+}
+
+func (s *Session) expireLeasesLocked(now time.Time) {
+	for _, peer := range s.Peers {
+		if peer == nil || len(peer.leases) == 0 {
+			continue
+		}
+		for idx, exp := range peer.leases {
+			if now.After(exp) {
+				delete(peer.leases, idx)
+				if peer.connNum > 0 {
+					peer.connNum--
+				}
+			}
+		}
+	}
+}
+
+func (s *Session) peerByConn(conn net.Conn) string {
+	if conn == nil || conn.RemoteAddr() == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+	if err != nil {
+		return ""
+	}
+	var found string
+	for uid, peer := range s.Peers {
+		if peer == nil || peer.connAddr == "" {
+			continue
+		}
+		ph, _, err := net.SplitHostPort(peer.connAddr)
+		if err != nil || ph != host {
+			continue
+		}
+		if found != "" {
+			return ""
+		}
+		found = uid
+	}
+	return found
+}
+
+func leaseKey(requester string, index int64) string {
+	return requester + ":" + strconv.FormatInt(index, 10)
 }

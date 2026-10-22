@@ -20,6 +20,9 @@ func (c *Codec) Decode(r io.Reader, payloadBuf []byte) (*Packet, error) {
 	if err != nil {
 		return nil, err
 	}
+	if header[0] != TypeJSON && header[0] != TypeFileChunk {
+		return nil, ErrInvalidType
+	}
 	dataLen := binary.LittleEndian.Uint32(header[1:])
 	// 读取 Payload
 	if uint32(cap(payloadBuf)) < dataLen {
@@ -48,4 +51,28 @@ func (c *Codec) EncodeTo(conn net.Conn, typ uint8, payload []byte) error {
 	}
 	_, err := buf.WriteTo(conn)
 	return err
+}
+
+// DecodeBounded grows only for larger control frames, up to an explicit limit.
+func (c *Codec) DecodeBounded(r io.Reader, buf []byte, limit uint32) (*Packet, error) {
+	var header [5]byte
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		return nil, err
+	}
+	if header[0] != TypeJSON && header[0] != TypeFileChunk {
+		return nil, ErrInvalidType
+	}
+	n := binary.LittleEndian.Uint32(header[1:])
+	if n > limit {
+		return nil, fmt.Errorf("frame exceeds %d bytes", limit)
+	}
+	if uint32(cap(buf)) < n {
+		buf = make([]byte, n)
+	} else {
+		buf = buf[:n]
+	}
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, err
+	}
+	return &Packet{Type: header[0], Length: n, Payload: buf}, nil
 }

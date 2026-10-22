@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /Users/sanenchen/Desktop/Codes/Golang/go-silver-core -name \"*.go\" -not -path \"*/.git/*\" -exec wc -l {} +)"
+    ]
+  }
+}

@@ -1,109 +1,277 @@
-package gsp
+package gsp_test
 
 import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"fmt"
 	"go-silver-core/internal/chunk"
-	gsp2 "go-silver-core/internal/gsp"
+	_const "go-silver-core/internal/const"
+	"go-silver-core/internal/gsp"
+	"go-silver-core/internal/gsp_sdk/client"
+	"go-silver-core/internal/gsp_sdk/model"
 	"go-silver-core/internal/gsp_sdk/server"
-	"io"
-	"log"
+	"go-silver-core/internal/receiver"
+	"go-silver-core/pkg/gosilver"
+	"go-silver-core/pkg/mempool"
 	"net"
 	"os"
-	"strconv"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestDecode(t *testing.T) {
-	conn, err := net.Dial("tcp", "localhost:38080")
-	if err != nil {
-		panic(err)
-	}
-	defer conn.Close()
-	codec := gsp2.Codec{}
-	data, err := codec.Decode(conn)
-	log.Printf("chunkData: %s", string(data.Payload))
-	arr := strings.Split(string(data.Payload), ",")
-	if len(arr) == 2 {
-		blockNum, _ := strconv.ParseInt(arr[0], 10, 64)
-		fileSize, _ := strconv.ParseInt(arr[1], 10, 64)
-		f, _ := os.Create("out.apk")
-		f.Truncate(fileSize)
-		ck := chunk.NewFileChunk(f)
-		for i := int64(0); i < blockNum; i++ {
-			d := codec.Encode(gsp2.TypeJSON, []byte(strconv.FormatInt(i, 10)))
-			_, _ = conn.Write(d)
-			data, err := codec.Decode(conn)
-			if err != nil {
-				if err == io.EOF {
-					log.Println("服务器断开连接")
-				} else {
-					log.Printf("读取协议出错: %v", err)
-				}
-				break
-			}
-			if data.Type == gsp2.TypeFileChunk {
-				ck.Save(i, data.Payload)
-			}
-		}
-	}
-
-}
-
-func TestEncode(t *testing.T) {
-	lis, err := net.ListenTCP("tcp", &net.TCPAddr{
-		Port: 38080,
-	})
-	if err != nil {
-		panic("启动端口监听失败" + err.Error())
-	}
-	defer lis.Close()
-	for {
-		conn, err := lis.Accept()
-		if err != nil {
-			panic(err)
-		}
-		go handleConn(conn)
-	}
-}
-
-func handleConn(conn net.Conn) {
-	f, _ := os.Open("test.apk")
-	ck := chunk.NewFileChunk(f)
-	chunkNum := ck.GetChunkNum()
-	codec := gsp2.Codec{}
-
-	// 发送块大小
-	data := codec.Encode(gsp2.TypeJSON, []byte(strconv.FormatInt(chunkNum, 10)+","+strconv.FormatInt(ck.FileStat.Size(), 10)))
-	_, _ = conn.Write(data)
-	// 进入等待块请求模式
-	go func() {
-		for {
-			data, err := codec.Decode(conn)
-			if err != nil {
-				if err == io.EOF {
-					log.Println("服务器断开连接")
-				} else {
-					log.Printf("读取协议出错: %v", err)
-				}
-				break
-			}
-			if data.Type == gsp2.TypeJSON {
-				index, _ := strconv.ParseInt(string(data.Payload), 10, 64)
-				chunkData, _ := ck.ReadChunk(index)
-				d := codec.Encode(gsp2.TypeFileChunk, chunkData)
-				_, _ = conn.Write(d)
-			}
-		}
-	}()
-	select {}
-
-}
-
-func TestGspSession(t *testing.T) {
-	session := server.NewGspSession(":58080")
-	err := session.Start()
+func TestCodecRoundTripAndMalformedFrames(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	codec := gsp.Codec{}
+	payload := []byte(`{"operate":"getFileStatus"}`)
+	done := make(chan error, 1)
+	go func() { done <- codec.EncodeTo(a, gsp.TypeJSON, payload) }()
+	packet, err := codec.Decode(b, make([]byte, 1024))
 	if err != nil {
 		t.Fatal(err)
 	}
-	select {}
+	if !bytes.Equal(packet.Payload, payload) || packet.Type != gsp.TypeJSON {
+		t.Fatal("frame mismatch")
+	}
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	for _, typ := range []byte{gsp.TypeJSON, 0xff} {
+		var h [5]byte
+		h[0] = typ
+		binary.LittleEndian.PutUint32(h[1:], 99999)
+		if _, err = codec.Decode(bytes.NewReader(h[:]), make([]byte, 16)); err == nil {
+			t.Fatal("malformed frame accepted")
+		}
+	}
+}
+func TestReceiverCompletesAndKeepsSeeding(t *testing.T) {
+	for _, size := range []int{0, 31, _const.ChunkSize*2 + 117} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			data := bytes.Repeat([]byte{0x53}, size)
+			path := filepath.Join(t.TempDir(), "source.bin")
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			srv := gosilver.NewServer("127.0.0.1:0", path)
+			if err := srv.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer srv.Stop()
+			addr := fmt.Sprintf("127.0.0.1:%d", srv.Port())
+			dest := t.TempDir()
+			receiver := gosilver.NewClient(addr, dest)
+			defer receiver.CancelDownload()
+			progress, err := receiver.StartDownload()
+			if err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.NewTimer(10 * time.Second)
+			defer deadline.Stop()
+		loop:
+			for {
+				select {
+				case p, ok := <-progress:
+					if !ok {
+						break loop
+					}
+					if p.Status == "failed" {
+						t.Fatal(p.Error)
+					}
+				case <-deadline.C:
+					t.Fatal("download hung")
+				}
+			}
+			if receiver.GetStatus().Status != "completed" {
+				t.Fatalf("status: %+v", receiver.GetStatus())
+			}
+			got, err := os.ReadFile(filepath.Join(dest, "source.bin"))
+			if err != nil || !bytes.Equal(got, data) {
+				t.Fatalf("output mismatch: %v", err)
+			}
+		})
+	}
+}
+func TestRegistrationWatchSameConnectionAndShutdown(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	_, _ = f.Write([]byte("test"))
+	pool := mempool.NewMemPool(_const.ChunkSize)
+	s := server.NewGspSession("127.0.0.1:0", pool)
+	if err = s.BeSendMain(f); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+	sdk := client.NewGspSdk(fmt.Sprintf("127.0.0.1:%d", s.Port()), pool)
+	defer sdk.Close()
+	if err = sdk.PeerReg(48081, "receiver"); err != nil {
+		t.Fatal(err)
+	}
+	push := make(chan model.PushStart, 1)
+	down := make(chan struct{})
+	go sdk.Watch(func(p model.PushStart) { push <- p }, func() { close(down) })
+	until := time.Now().Add(time.Second)
+	for len(s.Snapshot()) < 2 && time.Now().Before(until) {
+		time.Sleep(time.Millisecond)
+	}
+	if s.BroadcastStart() != 1 {
+		t.Fatal("push not delivered to registered socket")
+	}
+	select {
+	case p := <-push:
+		if p.FileSize != 4 {
+			t.Fatal(p)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("push hung")
+	}
+	stopped := make(chan struct{})
+	go func() { s.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("stop hung")
+	}
+	select {
+	case <-down:
+	case <-time.After(time.Second):
+		t.Fatal("watch did not stop")
+	}
+}
+func TestCancellationInterruptsUnresponsiveSender(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, e := lis.Accept()
+		if e == nil {
+			accepted <- c
+		}
+	}()
+	c := gosilver.NewClient(lis.Addr().String(), t.TempDir())
+	_, err = c.StartDownload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := <-accepted
+	defer conn.Close()
+	done := make(chan struct{})
+	go func() { c.CancelDownload(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancel waited for network timeout")
+	}
+}
+func TestSDKContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	sdk := client.NewGspSdk("127.0.0.1:1", mempool.NewMemPool(_const.ChunkSize)).WithContext(ctx)
+	defer sdk.Close()
+	if _, err := sdk.GetFileStatus(); err == nil {
+		t.Fatal("cancel ignored")
+	}
+}
+
+func TestCompletedPeerStillServesVerifiedChunk(t *testing.T) {
+	data := bytes.Repeat([]byte("p2p"), 30000)
+	sourcePath := filepath.Join(t.TempDir(), "source.bin")
+	if err := os.WriteFile(sourcePath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	pool := mempool.NewMemPool(_const.ChunkSize)
+	source := server.NewGspSession("127.0.0.1:0", pool)
+	if err = source.BeSendMain(f); err != nil {
+		t.Fatal(err)
+	}
+	if err = source.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer source.Stop()
+	sourceAddr := fmt.Sprintf("127.0.0.1:%d", source.Port())
+	peer := server.NewGspSession("127.0.0.1:0", pool)
+	if err = peer.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Stop()
+	sdk := client.NewGspSdk(sourceAddr, pool)
+	defer sdk.Close()
+	meta, err := sdk.GetFileStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = sdk.PeerReg(peer.Port(), peer.UUID); err != nil {
+		t.Fatal(err)
+	}
+	if err = receiver.RunTo(context.Background(), sourceAddr, filepath.Join(t.TempDir(), "complete.bin"), peer, sdk, meta, nil); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.Create(filepath.Join(t.TempDir(), "copy.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	if err = out.Truncate(meta.FileSize); err != nil {
+		t.Fatal(err)
+	}
+	ck := chunk.NewFileChunk(out, pool)
+	fromPeer := client.NewGspSdk(fmt.Sprintf("127.0.0.1:%d", peer.Port()), pool)
+	defer fromPeer.Close()
+	if _, _, err = fromPeer.FetchChunk(fmt.Sprintf("127.0.0.1:%d", peer.Port()), 0, ck); err != nil {
+		t.Fatalf("completed receiver cannot seed: %v", err)
+	}
+	got, err := os.ReadFile(out.Name())
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("peer payload mismatch: %v", err)
+	}
+}
+
+func TestUnreadyAndChangedSourcesReturnReasonInsteadOfEOF(t *testing.T) {
+	pool := mempool.NewMemPool(_const.ChunkSize)
+	s := server.NewGspSession("127.0.0.1:0", pool)
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+	sdk := client.NewGspSdk(fmt.Sprintf("127.0.0.1:%d", s.Port()), pool)
+	defer sdk.Close()
+	if _, err := sdk.GetFileStatus(); err == nil || !strings.Contains(err.Error(), "尚未就绪") {
+		t.Fatalf("unready sender returned unclear error: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "changing.bin")
+	if err := os.WriteFile(path, []byte("before"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err = s.BeSendMain(f); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, []byte("after-changed"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sdk.GetFileStatus(); err == nil || !strings.Contains(err.Error(), "已变化") {
+		t.Fatalf("source change returned unclear error: %v", err)
+	}
 }

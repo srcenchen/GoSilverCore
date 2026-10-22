@@ -14,12 +14,11 @@ type FileChunk struct {
 	FileStat  os.FileInfo
 	chunkSize int64 // 以 Byte 为单位
 	memPool   *mempool.MemPool
-	ioPermit  chan struct{}
 }
 
 // GetChunkNum 获取文件的分块数
 func (f *FileChunk) GetChunkNum() int64 {
-	if f.FileStat.Size() == 0 {
+	if f.FileStat == nil || f.FileStat.Size() == 0 {
 		return 0
 	}
 	return (f.FileStat.Size() + f.chunkSize - 1) / f.chunkSize
@@ -37,6 +36,14 @@ func NewFileChunk(f *os.File, pool *mempool.MemPool) *FileChunk {
 		file:      f,
 		chunkSize: chunkSize,
 		memPool:   pool,
-		ioPermit:  make(chan struct{}, 1),
 	}
+}
+
+// Unchanged protects main-source transfers from silently mixing file versions.
+func (f *FileChunk) Unchanged() bool {
+	if f.FileStat == nil {
+		return false
+	}
+	now, err := f.file.Stat()
+	return err == nil && now.Size() == f.FileStat.Size() && now.ModTime().Equal(f.FileStat.ModTime()) && os.SameFile(now, f.FileStat)
 }
